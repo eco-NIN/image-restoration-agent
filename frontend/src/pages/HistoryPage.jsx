@@ -4,7 +4,7 @@ import Alert from '../components/Alert.jsx'
 import Card from '../components/Card.jsx'
 import PageHeader from '../components/PageHeader.jsx'
 import StatusBanner from '../components/StatusBanner.jsx'
-import { fetchHistory } from '../services/apiClient.js'
+import { fetchHistory, resolveApiAssetUrl } from '../services/apiClient.js'
 import { formatDateTime } from '../utils/time.js'
 
 function HistorySkeleton() {
@@ -152,7 +152,7 @@ export default function HistoryPage() {
                       <div className="h-12 w-16 overflow-hidden rounded border border-slate-200 bg-slate-100">
                         {it.thumbnailUrl ? (
                           <img
-                            src={it.thumbnailUrl}
+                            src={resolveApiAssetUrl(it.thumbnailUrl)}
                             alt="缩略图"
                             className="h-full w-full object-cover"
                           />

@@ -1,0 +1,33 @@
+2026-04-24 21:46:58,867 - INFO
+Running 4KAgent under the profile: MyAgent_API
+
+2026-04-24 21:46:58,867 - INFO
+Face Restoration: True
+
+2026-04-24 21:46:58,867 - INFO
+Brightening: False
+
+2026-04-24 21:46:58,867 - INFO
+Old Photo Restoration: False
+
+2026-04-24 21:46:58,952 - INFO
+Target factor for super-resolution: 4
+
+2026-04-24 21:48:29,117 - INFO
+IQA scores: CLIPIQA+: 0.5243
+TOPIQ_NR: 0.2563
+MUSIQ: 31.5315
+NIQE: 11.0918
+
+2026-04-24 21:48:31,188 - INFO
+Image description: {
+  "degradations": ["defocus blur"],
+  "image_description": "A cat figurine holding AirPods."
+}
+
+2026-04-24 21:48:31,736 - INFO
+Plan: ['super-resolution']
+
+2026-04-24 21:48:31,966 - INFO
+Executing super-resolution on input...
+

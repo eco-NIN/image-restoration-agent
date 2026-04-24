@@ -8,6 +8,13 @@ export const apiClient = axios.create({
   timeout: 60_000,
 })
 
+export function resolveApiAssetUrl(path) {
+  if (!path || typeof path !== 'string') return ''
+  if (/^https?:\/\//i.test(path)) return path
+  if (!apiBaseURL) return path
+  return `${apiBaseURL.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
+}
+
 function normalizeError(error) {
   if (!error) return '未知错误'
 
@@ -29,10 +36,9 @@ function normalizeError(error) {
 
 /**
  * 提交一次图像复原任务
- * 约定接口（可按实际后端调整）：
  * - POST /api/restore
  * - form-data: image(file), mode(string)
- * - response: { taskId: string, resultImageUrl: string }
+ * - response: { taskId: string, status: string }
  */
 export async function submitRestoreTask({ imageFile, mode }) {
   const form = new FormData()
@@ -44,6 +50,19 @@ export async function submitRestoreTask({ imageFile, mode }) {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
 
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+/**
+ * 查询任务状态与日志
+ * - GET /api/tasks/:taskId
+ */
+export async function fetchTaskStatus(taskId) {
+  try {
+    const res = await apiClient.get(`/api/tasks/${taskId}`)
     return res.data
   } catch (err) {
     throw new Error(normalizeError(err))

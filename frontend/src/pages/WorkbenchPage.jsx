@@ -8,7 +8,11 @@ import Card from '../components/Card.jsx'
 import FileDropzone from '../components/FileDropzone.jsx'
 import PageHeader from '../components/PageHeader.jsx'
 import StatusBanner from '../components/StatusBanner.jsx'
-import { submitRestoreTask } from '../services/apiClient.js'
+import {
+  fetchTaskStatus,
+  resolveApiAssetUrl,
+  submitRestoreTask,
+} from '../services/apiClient.js'
 import { downloadByUrl } from '../utils/download.js'
 
 const RESTORE_MODES = [
@@ -37,6 +41,7 @@ export default function WorkbenchPage() {
   const [statusMessage, setStatusMessage] = useState('')
   const [taskId, setTaskId] = useState('')
   const [resultUrl, setResultUrl] = useState('')
+  const [logText, setLogText] = useState('')
 
   const [isDownloading, setIsDownloading] = useState(false)
 
@@ -45,6 +50,7 @@ export default function WorkbenchPage() {
 
   const inFlightRef = useRef(false)
   const inferTimerRef = useRef(null)
+  const pollingRef = useRef(null)
 
   useEffect(() => {
     if (!imageFile) {
@@ -79,46 +85,93 @@ export default function WorkbenchPage() {
     inFlightRef.current = true
     setTaskId('')
     setResultUrl('')
+    setLogText('')
 
     // 阶段 1：上传阶段
     setStatus('uploading')
     setStatusMessage('正在上传输入图像…')
 
-    // 阶段 2：推理阶段（用于 UI 展示；真实阶段以接口耗时为准）
+    // 阶段 2：推理阶段（由轮询状态实时更新）
     inferTimerRef.current = window.setTimeout(() => {
       setStatus('inferencing')
-      setStatusMessage('云端 GPU 推理中，请稍候…')
+      setStatusMessage('任务已提交，等待后端执行…')
     }, 600)
 
     try {
       const data = await submitRestoreTask({ imageFile, mode })
 
-      // 兼容不同后端字段命名：尽量容错
-      const nextTaskId = data?.taskId || data?.id || ''
-      const nextResultUrl = data?.resultImageUrl || data?.resultUrl || ''
-
-      if (!nextResultUrl) {
-        throw new Error(
-          '接口返回缺少结果图片地址（resultImageUrl），请检查后端响应字段。',
-        )
+      const nextTaskId = data?.taskId || data?.id
+      if (!nextTaskId) {
+        throw new Error('接口返回缺少 taskId，请检查后端响应字段。')
       }
 
       setTaskId(String(nextTaskId))
-      setResultUrl(String(nextResultUrl))
-      setStatus('done')
-      setStatusMessage('处理完成：已生成复原结果。')
+      setStatus('inferencing')
+      setStatusMessage('云端 GPU 推理中，请稍候…')
+
+      pollingRef.current = window.setInterval(async () => {
+        try {
+          const task = await fetchTaskStatus(String(nextTaskId))
+          setLogText(task?.logText || '')
+
+          if (task?.status === 'done') {
+            setResultUrl(resolveApiAssetUrl(task?.resultImageUrl || ''))
+            setStatus('done')
+            setStatusMessage('处理完成：已生成复原结果。')
+            inFlightRef.current = false
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current)
+              pollingRef.current = null
+            }
+            return
+          }
+
+          if (task?.status === 'failed') {
+            setStatus('idle')
+            setStatusMessage('')
+            setErrorMessage(task?.errorMessage || '任务执行失败')
+            inFlightRef.current = false
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current)
+              pollingRef.current = null
+            }
+          }
+        } catch (pollError) {
+          setStatus('idle')
+          setStatusMessage('')
+          setErrorMessage(pollError?.message || '查询任务状态失败')
+          inFlightRef.current = false
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current)
+            pollingRef.current = null
+          }
+        }
+      }, 2000)
     } catch (e) {
       setStatus('idle')
       setStatusMessage('')
       setErrorMessage(e?.message || '处理失败')
-    } finally {
       inFlightRef.current = false
+    } finally {
       if (inferTimerRef.current) {
         clearTimeout(inferTimerRef.current)
         inferTimerRef.current = null
       }
     }
   }
+
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
+      }
+      if (inferTimerRef.current) {
+        clearTimeout(inferTimerRef.current)
+        inferTimerRef.current = null
+      }
+    }
+  }, [])
 
   async function handleDownloadOriginal() {
     if (!previewUrl) return
@@ -167,6 +220,7 @@ export default function WorkbenchPage() {
                 // 用户重新选择图片后，清理历史结果，避免误解
                 setTaskId('')
                 setResultUrl('')
+                setLogText('')
                 setStatus('idle')
                 setStatusMessage('')
               }}
@@ -279,6 +333,17 @@ export default function WorkbenchPage() {
                 <p className="text-xs font-semibold text-slate-900">结果</p>
                 <p className="mt-1 text-xs text-slate-600">生成对比与下载</p>
               </div>
+            </div>
+          </Card>
+
+          <Card>
+            <h3 className="text-sm font-semibold tracking-tight text-slate-900">
+              智能体推理过程（日志）
+            </h3>
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-950 p-3">
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-emerald-200">
+                {logText || '日志将在任务开始后显示（含命令输出与 workflow.log 片段）'}
+              </pre>
             </div>
           </Card>
         </section>

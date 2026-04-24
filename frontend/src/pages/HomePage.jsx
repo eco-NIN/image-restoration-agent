@@ -5,18 +5,28 @@ import { Button } from '../components/Button.jsx'
 import Card from '../components/Card.jsx'
 import PageHeader from '../components/PageHeader.jsx'
 
-function ComparePlaceholder({ label }) {
+const BEFORE_SAMPLE = '/demo/before.jpg'
+const AFTER_SAMPLE = '/demo/after.jpg'
+
+function ComparePlaceholder({ label, imageSrc }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white/90 p-4 shadow-sm">
       <div className="flex items-center justify-between">
         <p className="text-sm font-semibold tracking-tight text-slate-900">{label}</p>
         <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-500">
-          占位图
+          示例图
         </span>
       </div>
-      <div className="mt-3 aspect-[4/3] w-full rounded-lg border border-slate-200 bg-gradient-to-br from-slate-100 via-white to-slate-100" />
+      <div className="mt-3 aspect-[4/3] w-full overflow-hidden rounded-lg border border-slate-200 bg-gradient-to-br from-slate-100 via-white to-slate-100">
+        <img
+          src={imageSrc}
+          alt={label}
+          className="h-full w-full object-contain"
+          loading="lazy"
+        />
+      </div>
       <p className="mt-2 text-xs text-slate-500">
-        在论文/答辩演示中可替换为真实样例。
+        替换 frontend/public/demo 下同名文件即可更新该展示。
       </p>
     </div>
   )
@@ -73,8 +83,8 @@ export default function HomePage() {
         </header>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <ComparePlaceholder label="处理前（Before）" />
-          <ComparePlaceholder label="处理后（After）" />
+          <ComparePlaceholder label="处理前（Before）" imageSrc={BEFORE_SAMPLE} />
+          <ComparePlaceholder label="处理后（After）" imageSrc={AFTER_SAMPLE} />
         </div>
       </section>
     </div>
