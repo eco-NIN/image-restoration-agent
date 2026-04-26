@@ -96,7 +96,7 @@ export FOURKAGENT_DIR=/gz-data/projects2/4KAgent
 export FOURKAGENT_GPU_ID=0
 export FOURKAGENT_PROFILE_NAME=MyAgent_API
 
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn backend.app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
 ### 6.4 启动前端

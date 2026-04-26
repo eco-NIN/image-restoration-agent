@@ -1,0 +1,63 @@
+2026-04-26 22:32:14,820 - INFO
+Running 4KAgent under the profile: MyAgent_API
+
+2026-04-26 22:32:14,820 - INFO
+Face Restoration: True
+
+2026-04-26 22:32:14,821 - INFO
+Brightening: False
+
+2026-04-26 22:32:14,821 - INFO
+Old Photo Restoration: False
+
+2026-04-26 22:32:14,821 - INFO
+Target factor for super-resolution: 4
+
+2026-04-26 22:33:22,693 - INFO
+IQA scores: CLIPIQA+: 0.4275
+TOPIQ_NR: 0.1805
+MUSIQ: 18.1645
+NIQE: 9.8095
+
+2026-04-26 22:33:23,745 - INFO
+Image description: {
+    "degradations": ["jpeg compression artifact"],
+    "image_description": "A portrait of a woman wearing traditional attire."
+}
+
+2026-04-26 22:33:23,914 - INFO
+Plan: ['super-resolution']
+
+2026-04-26 22:33:24,428 - INFO
+Executing super-resolution on input...
+
+2026-04-26 22:36:23,120 - INFO
+hat_gan is used in restoration from low resolution, sequence: super-resolution@hat_gan .
+
+2026-04-26 22:39:50,209 - INFO
+swinir_gan is used in restoration from low resolution, sequence: super-resolution@swinir_gan .
+
+2026-04-26 22:43:37,217 - INFO
+Best tool: swinir_gan
+
+2026-04-26 22:43:37,217 - INFO
+Executing face restoration ...
+
+2026-04-26 22:44:06,441 - INFO
+Face: 000 Face restoration result: Origin Face Score: 0.960624327260301.
+
+2026-04-26 22:44:37,470 - INFO
+Face: 000 Face restoration result: codeformer Score: 1.284573636315169.
+
+2026-04-26 22:45:43,292 - INFO
+Face: 000 Face restoration result: difface Score: 1.134899810454611.
+
+2026-04-26 22:46:22,961 - INFO
+Face: 000 Face restoration result: gfpgan Score: 1.2820043439994704.
+
+2026-04-26 22:46:23,212 - INFO
+Super-resolution result: super-resolution@swinir_gan with quality score 0.8353607421875.
+
+2026-04-26 22:46:23,213 - INFO
+Restoration result: super-resolution@swinir_gan.
+

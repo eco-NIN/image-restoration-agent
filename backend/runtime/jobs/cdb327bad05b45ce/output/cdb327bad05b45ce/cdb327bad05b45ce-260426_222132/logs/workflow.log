@@ -1,0 +1,66 @@
+2026-04-26 22:21:33,668 - INFO
+Running 4KAgent under the profile: MyAgent_API
+
+2026-04-26 22:21:33,669 - INFO
+Face Restoration: True
+
+2026-04-26 22:21:33,669 - INFO
+Brightening: False
+
+2026-04-26 22:21:33,669 - INFO
+Old Photo Restoration: False
+
+2026-04-26 22:21:33,671 - INFO
+Target factor for super-resolution: 4
+
+2026-04-26 22:21:38,982 - INFO
+IQA scores: CLIPIQA+: 0.2692
+TOPIQ_NR: 0.2195
+MUSIQ: 30.198
+NIQE: 11.245
+
+2026-04-26 22:21:40,368 - INFO
+Image description: {
+  "degradations": ["noise", "jpeg compression artifact"],
+  "image_description": "A portrait photograph featuring a person with short hair wearing a light-colored top."
+}
+
+2026-04-26 22:21:40,478 - INFO
+Plan: ['super-resolution']
+
+2026-04-26 22:21:40,651 - INFO
+Executing super-resolution on input...
+
+2026-04-26 22:21:48,549 - INFO
+hat_gan is used in restoration from low resolution, sequence: super-resolution@hat_gan .
+
+2026-04-26 22:21:59,393 - INFO
+swinir_gan is used in restoration from low resolution, sequence: super-resolution@swinir_gan .
+
+2026-04-26 22:22:31,357 - INFO
+Best tool: swinir_gan
+
+2026-04-26 22:22:31,358 - INFO
+Executing face restoration ...
+
+2026-04-26 22:22:42,693 - INFO
+Face: 000 Face restoration result: Origin Face Score: 1.060329352050923.
+
+2026-04-26 22:23:01,456 - INFO
+Face: 000 Face restoration result: codeformer Score: 1.250757928025987.
+
+2026-04-26 22:23:26,860 - INFO
+Face: 000 Face restoration result: difface Score: 1.3141880482568093.
+
+2026-04-26 22:23:47,128 - INFO
+Face: 000 Face restoration result: gfpgan Score: 1.222099013579318.
+
+2026-04-26 22:23:47,428 - INFO
+Applying global color alignment...
+
+2026-04-26 22:23:47,591 - INFO
+Super-resolution result: super-resolution@swinir_gan with quality score 0.6926050781249999.
+
+2026-04-26 22:23:47,592 - INFO
+Restoration result: super-resolution@swinir_gan.
+

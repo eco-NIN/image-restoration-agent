@@ -5,33 +5,57 @@ function isImageFile(file) {
   return !!file && typeof file.type === 'string' && file.type.startsWith('image/')
 }
 
-export default function FileDropzone({ value, onChange, error }) {
+export default function FileDropzone({
+  value,
+  values,
+  onChange,
+  error,
+  multiple = false,
+  directory = false,
+}) {
   const inputId = useId()
   const inputRef = useRef(null)
 
   // 关键状态：拖拽交互的视觉反馈
   const [isDragging, setIsDragging] = useState(false)
 
-  const fileName = value?.name ?? ''
+  const selectedFiles = Array.isArray(values)
+    ? values
+    : value
+      ? [value]
+      : []
+  const fileName = selectedFiles[0]?.name ?? ''
   const hintText = useMemo(() => {
+    if (selectedFiles.length > 1) {
+      return `已选择 ${selectedFiles.length} 张图片（首张：${fileName}）`
+    }
     if (fileName) return `已选择：${fileName}`
+    if (directory) {
+      return '拖拽图片文件夹或点击选择文件夹（自动筛选其中的图片）'
+    }
+    if (multiple) {
+      return '拖拽多张图片到此处，或点击选择文件（支持 PNG/JPG/WebP 等）'
+    }
     return '拖拽图片到此处，或点击选择文件（支持 PNG/JPG/WebP 等）'
-  }, [fileName])
+  }, [directory, fileName, multiple, selectedFiles.length])
 
   function pickFile() {
     inputRef.current?.click()
   }
 
   function handleFiles(files) {
-    const file = files?.[0]
-    if (!file) return
-
-    if (!isImageFile(file)) {
-      onChange?.(null, '请选择图片文件（image/*）')
+    const list = Array.from(files || []).filter((file) => isImageFile(file))
+    if (!list.length) {
+      onChange?.(multiple ? [] : null, '请选择图片文件（image/*）')
       return
     }
 
-    onChange?.(file, null)
+    if (!multiple && !directory) {
+      onChange?.(list[0], null)
+      return
+    }
+
+    onChange?.(list, null)
   }
 
   return (
@@ -41,6 +65,8 @@ export default function FileDropzone({ value, onChange, error }) {
         ref={inputRef}
         type="file"
         accept="image/*"
+        multiple={multiple || directory}
+        {...(directory ? { webkitdirectory: '', directory: '' } : {})}
         className="hidden"
         onChange={(e) => handleFiles(e.target.files)}
       />

@@ -1,0 +1,5 @@
+0-img, 1.116107892044322
+tool-face-0-codeformer, 1.2355125030898182
+tool-face-0-difface, 1.0807652395053815
+tool-face-0-gfpgan, 1.1185124910000692
+

@@ -57,6 +57,29 @@ export async function submitRestoreTask({ imageFile, mode }) {
 }
 
 /**
+ * 批量提交图像复原任务
+ * - POST /api/restore/batch
+ * - form-data: images(file[]), mode(string)
+ * - response: { batchId, status, tasks: Array<{ taskId, fileName, status }> }
+ */
+export async function submitRestoreBatchTask({ imageFiles, mode }) {
+  const form = new FormData()
+  imageFiles.forEach((file) => {
+    form.append('images', file)
+  })
+  form.append('mode', mode)
+
+  try {
+    const res = await apiClient.post('/api/restore/batch', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+/**
  * 查询任务状态与日志
  * - GET /api/tasks/:taskId
  */
