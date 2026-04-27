@@ -66,6 +66,8 @@ export async function submitRestoreBatchTask({ imageFiles, mode }) {
   const form = new FormData()
   imageFiles.forEach((file) => {
     form.append('images', file)
+    const relativePath = file.webkitRelativePath || file.name
+    form.append('image_paths', relativePath)
   })
   form.append('mode', mode)
 
@@ -86,6 +88,19 @@ export async function submitRestoreBatchTask({ imageFiles, mode }) {
 export async function fetchTaskStatus(taskId) {
   try {
     const res = await apiClient.get(`/api/tasks/${taskId}`)
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+/**
+ * 主动取消任务
+ * - POST /api/tasks/:taskId/cancel
+ */
+export async function cancelTask(taskId) {
+  try {
+    const res = await apiClient.post(`/api/tasks/${taskId}/cancel`)
     return res.data
   } catch (err) {
     throw new Error(normalizeError(err))

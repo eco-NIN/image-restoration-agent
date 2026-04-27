@@ -3,11 +3,27 @@ __pycache__/
 *.pyc
 .env
 venv/
+.pytest_cache/
+
+# Runtime artifacts
+backend/runtime/
+*.log
+
+# Local evaluation outputs
+eval_set5_5/logs/
+eval_set5_5/*_tmp/
+eval_set5_5
 
 # Node
 node_modules/
 dist/
 build/
+frontend/dist/
+frontend/node_modules/
+
+# IDE
+.vscode/
+.idea/
 
 # Mac
 .DS_Store

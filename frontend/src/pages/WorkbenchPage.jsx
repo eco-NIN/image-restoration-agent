@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, Settings2, WandSparkles } from 'lucide-react'
+import {
+  Download,
+  Folder,
+  FolderOpen,
+  Settings2,
+  StopCircle,
+  WandSparkles,
+  X,
+} from 'lucide-react'
 
 import Alert from '../components/Alert.jsx'
 import BeforeAfterSlider from '../components/BeforeAfterSlider.jsx'
@@ -9,12 +17,15 @@ import FileDropzone from '../components/FileDropzone.jsx'
 import PageHeader from '../components/PageHeader.jsx'
 import StatusBanner from '../components/StatusBanner.jsx'
 import {
+  cancelTask,
   fetchTaskStatus,
   resolveApiAssetUrl,
   submitRestoreBatchTask,
   submitRestoreTask,
 } from '../services/apiClient.js'
 import { downloadByUrl } from '../utils/download.js'
+
+const WORKBENCH_RUNTIME_KEY = 'workbench_runtime_v2'
 
 const RESTORE_MODES = [
   { value: 'FastGen4K_P', label: 'FastGen4K_P（默认）' },
@@ -30,8 +41,47 @@ function modeLabel(modeValue) {
 function jobStatusStyle(status) {
   if (status === 'done') return 'bg-emerald-100 text-emerald-800 border-emerald-200'
   if (status === 'failed') return 'bg-rose-100 text-rose-800 border-rose-200'
+  if (status === 'cancelled') return 'bg-slate-200 text-slate-700 border-slate-300'
+  if (status === 'cancelling') return 'bg-amber-100 text-amber-800 border-amber-200'
   if (status === 'running') return 'bg-indigo-100 text-indigo-800 border-indigo-200'
   return 'bg-slate-100 text-slate-700 border-slate-200'
+}
+
+function isTerminalStatus(status) {
+  return status === 'done' || status === 'failed' || status === 'cancelled'
+}
+
+function normalizeFlowText(value) {
+  if (value === null || value === undefined) return ''
+  const text = String(value).trim()
+  if (!text) return ''
+
+  if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item)))
+          .join('；')
+      }
+      if (parsed && typeof parsed === 'object') {
+        return Object.entries(parsed)
+          .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+          .join('；')
+      }
+    } catch {
+      // ignore parse error and fallback below
+    }
+  }
+
+  return text.replace(/[{}\[\]"]/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function summarizeFinalStatus(nextJobs) {
+  const doneCount = nextJobs.filter((it) => it.status === 'done').length
+  const failCount = nextJobs.filter((it) => it.status === 'failed').length
+  const cancelCount = nextJobs.filter((it) => it.status === 'cancelled').length
+  return `处理结束：成功 ${doneCount}，失败 ${failCount}，取消 ${cancelCount}`
 }
 
 export default function WorkbenchPage() {
@@ -44,16 +94,28 @@ export default function WorkbenchPage() {
   const [status, setStatus] = useState('idle')
   const [statusMessage, setStatusMessage] = useState('')
   const [batchId, setBatchId] = useState('')
+  const [batchSourceType, setBatchSourceType] = useState('single')
   const [jobs, setJobs] = useState([])
   const [activeTaskId, setActiveTaskId] = useState('')
 
   const [isDownloading, setIsDownloading] = useState(false)
   const [previewUrls, setPreviewUrls] = useState([])
+  const [expandedGroups, setExpandedGroups] = useState({})
+  const [floatingCompareTaskId, setFloatingCompareTaskId] = useState('')
+  const [floatingPos, setFloatingPos] = useState({ x: 120, y: 120 })
 
   const inFlightRef = useRef(false)
   const inferTimerRef = useRef(null)
   const pollingRef = useRef(null)
   const pollingBusyRef = useRef(false)
+  const jobsRef = useRef([])
+  const restoredRef = useRef(false)
+
+  const dragStateRef = useRef({ active: false, offsetX: 0, offsetY: 0 })
+
+  useEffect(() => {
+    jobsRef.current = jobs
+  }, [jobs])
 
   useEffect(() => {
     if (!imageFiles.length) {
@@ -63,6 +125,7 @@ export default function WorkbenchPage() {
 
     const urls = imageFiles.map((file) => ({
       fileName: file.name,
+      relativePath: file.webkitRelativePath || file.name,
       url: URL.createObjectURL(file),
     }))
     setPreviewUrls(urls)
@@ -72,11 +135,78 @@ export default function WorkbenchPage() {
     }
   }, [imageFiles])
 
-  const isBatch = imageFiles.length > 1
+  useEffect(() => {
+    const onMouseMove = (e) => {
+      if (!dragStateRef.current.active) return
+      const nextX = Math.max(12, e.clientX - dragStateRef.current.offsetX)
+      const nextY = Math.max(12, e.clientY - dragStateRef.current.offsetY)
+      setFloatingPos({ x: nextX, y: nextY })
+    }
+
+    const onMouseUp = () => {
+      dragStateRef.current.active = false
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (restoredRef.current) return
+    restoredRef.current = true
+    try {
+      const cached = window.localStorage.getItem(WORKBENCH_RUNTIME_KEY)
+      if (!cached) return
+      const parsed = JSON.parse(cached)
+      if (!parsed || typeof parsed !== 'object') return
+
+      setMode(parsed.mode || 'FastGen4K_P')
+      setStatus(parsed.status || 'idle')
+      setStatusMessage(parsed.statusMessage || '')
+      setBatchId(parsed.batchId || '')
+      setBatchSourceType(parsed.batchSourceType || 'single')
+      setActiveTaskId(parsed.activeTaskId || '')
+
+      const nextJobs = Array.isArray(parsed.jobs) ? parsed.jobs : []
+      setJobs(nextJobs)
+      jobsRef.current = nextJobs
+
+      const hasRunning = nextJobs.some((j) => !isTerminalStatus(j.status))
+      if (hasRunning) {
+        inFlightRef.current = true
+        beginPolling(nextJobs)
+      }
+    } catch {
+      // ignore cache errors
+    }
+  }, [])
+
+  useEffect(() => {
+    const payload = {
+      mode,
+      status,
+      statusMessage,
+      batchId,
+      batchSourceType,
+      activeTaskId,
+      jobs,
+    }
+    window.localStorage.setItem(WORKBENCH_RUNTIME_KEY, JSON.stringify(payload))
+  }, [mode, status, statusMessage, batchId, batchSourceType, activeTaskId, jobs])
+
+  const isBatch = jobs.length > 1 || imageFiles.length > 1
+  const isFolderBatch = batchSourceType === 'folder' || imageFiles.some((f) => (f.webkitRelativePath || '').includes('/'))
 
   const previewUrlMap = useMemo(() => {
     const map = new Map()
-    previewUrls.forEach((it) => map.set(it.fileName, it.url))
+    previewUrls.forEach((it) => {
+      map.set(it.fileName, it.url)
+      map.set(it.relativePath, it.url)
+    })
     return map
   }, [previewUrls])
 
@@ -89,9 +219,47 @@ export default function WorkbenchPage() {
     return jobs[0]
   }, [activeTaskId, jobs])
 
-  const canStart = useMemo(() => {
-    return imageFiles.length > 0 && !inFlightRef.current
-  }, [imageFiles.length])
+  const floatingCompareJob = useMemo(
+    () => jobs.find((job) => job.taskId === floatingCompareTaskId) || null,
+    [floatingCompareTaskId, jobs]
+  )
+
+  const canStart = useMemo(() => imageFiles.length > 0 && !inFlightRef.current, [imageFiles.length])
+  const canCancelCurrent = useMemo(() => {
+    if (!activeJob) return false
+    return !isTerminalStatus(activeJob.status)
+  }, [activeJob])
+  const canCancelAll = useMemo(
+    () => jobs.some((job) => !isTerminalStatus(job.status)),
+    [jobs]
+  )
+
+  const folderGroups = useMemo(() => {
+    if (!isFolderBatch) return []
+    const map = new Map()
+    jobs.forEach((job) => {
+      const rel = (job.relativePath || job.fileName || '').replace(/\\/g, '/')
+      const groupName = rel.includes('/') ? rel.split('/').slice(0, -1).join('/') || rel.split('/')[0] : '根目录'
+      const arr = map.get(groupName) || []
+      arr.push(job)
+      map.set(groupName, arr)
+    })
+    return Array.from(map.entries()).map(([groupName, items]) => ({
+      groupName,
+      items,
+    }))
+  }, [isFolderBatch, jobs])
+
+  useEffect(() => {
+    if (!folderGroups.length) return
+    setExpandedGroups((prev) => {
+      const next = { ...prev }
+      folderGroups.forEach((group) => {
+        if (!(group.groupName in next)) next[group.groupName] = true
+      })
+      return next
+    })
+  }, [folderGroups])
 
   function normalizeJob(taskData, fallbackName = '') {
     return {
@@ -103,13 +271,20 @@ export default function WorkbenchPage() {
       errorMessage: taskData?.errorMessage || '',
       logText: taskData?.logText || '',
       flow: taskData?.flow || null,
+      relativePath: taskData?.relativePath || '',
+      sourceType: taskData?.sourceType || 'single',
+      uploadGroup: taskData?.uploadGroup || '',
     }
   }
 
   function resetTaskStates() {
     setBatchId('')
+    setBatchSourceType('single')
     setJobs([])
+    jobsRef.current = []
     setActiveTaskId('')
+    setFloatingCompareTaskId('')
+    setExpandedGroups({})
   }
 
   function stopPolling() {
@@ -121,6 +296,7 @@ export default function WorkbenchPage() {
 
   function beginPolling(initialJobs) {
     setJobs(initialJobs)
+    jobsRef.current = initialJobs
     if (!activeTaskId && initialJobs.length) {
       setActiveTaskId(initialJobs[0].taskId)
     }
@@ -130,10 +306,11 @@ export default function WorkbenchPage() {
       if (pollingBusyRef.current) return
       pollingBusyRef.current = true
       try {
-        const currentJobs = jobs.length ? jobs : initialJobs
+        const currentJobs = jobsRef.current
+        if (!currentJobs.length) return
         const nextJobs = await Promise.all(
           currentJobs.map(async (job) => {
-            if (job.status === 'done' || job.status === 'failed') return job
+            if (isTerminalStatus(job.status)) return job
             try {
               const task = await fetchTaskStatus(job.taskId)
               return normalizeJob(task, job.fileName)
@@ -147,18 +324,19 @@ export default function WorkbenchPage() {
           })
         )
 
+        jobsRef.current = nextJobs
         setJobs(nextJobs)
 
-        const runningCount = nextJobs.filter(
-          (it) => it.status !== 'done' && it.status !== 'failed'
-        ).length
+        if (activeTaskId && !nextJobs.some((it) => it.taskId === activeTaskId)) {
+          setActiveTaskId(nextJobs[0]?.taskId || '')
+        }
+
+        const runningCount = nextJobs.filter((it) => !isTerminalStatus(it.status)).length
         if (runningCount === 0) {
           stopPolling()
           inFlightRef.current = false
-          const doneCount = nextJobs.filter((it) => it.status === 'done').length
-          const failCount = nextJobs.filter((it) => it.status === 'failed').length
           setStatus('done')
-          setStatusMessage(`处理完成：成功 ${doneCount}，失败 ${failCount}`)
+          setStatusMessage(summarizeFinalStatus(nextJobs))
         }
       } finally {
         pollingBusyRef.current = false
@@ -200,12 +378,14 @@ export default function WorkbenchPage() {
           normalizeJob(
             {
               taskId: String(nextTaskId),
-              fileName: imageFiles[0].name,
+              fileName: data?.fileName || imageFiles[0].name,
               status: data?.status || 'queued',
+              sourceType: 'single',
             },
             imageFiles[0].name
           ),
         ]
+        setBatchSourceType('single')
         setStatus('inferencing')
         setStatusMessage('云端 GPU 推理中，请稍候…')
         beginPolling(initialJobs)
@@ -216,9 +396,17 @@ export default function WorkbenchPage() {
           throw new Error('批量接口返回为空，请检查后端响应字段。')
         }
 
+        const sourceType = data?.sourceType || (imageFiles.some((f) => (f.webkitRelativePath || '').includes('/')) ? 'folder' : 'batch')
+        setBatchSourceType(sourceType)
         setBatchId(String(data?.batchId || ''))
         const initialJobs = submitted.map((it, index) =>
-          normalizeJob(it, imageFiles[index]?.name || '')
+          normalizeJob(
+            {
+              ...it,
+              sourceType,
+            },
+            imageFiles[index]?.name || ''
+          )
         )
 
         setStatus('inferencing')
@@ -238,6 +426,33 @@ export default function WorkbenchPage() {
     }
   }
 
+  async function handleCancelTask(taskId) {
+    if (!taskId) return
+    try {
+      await cancelTask(taskId)
+      setStatus('inferencing')
+      setStatusMessage('正在取消任务...')
+      const refreshed = await fetchTaskStatus(taskId)
+      setJobs((prev) => {
+        const next = prev.map((job) =>
+          job.taskId === taskId ? normalizeJob(refreshed, job.fileName) : job
+        )
+        jobsRef.current = next
+        return next
+      })
+    } catch (e) {
+      setErrorMessage(e?.message || '取消任务失败')
+    }
+  }
+
+  async function handleCancelAll() {
+    const pending = jobs.filter((job) => !isTerminalStatus(job.status))
+    if (!pending.length) return
+    setStatus('inferencing')
+    setStatusMessage(`正在取消 ${pending.length} 个任务...`)
+    await Promise.allSettled(pending.map((job) => cancelTask(job.taskId)))
+  }
+
   useEffect(() => {
     return () => {
       stopPolling()
@@ -250,7 +465,8 @@ export default function WorkbenchPage() {
 
   async function handleDownloadOriginal() {
     if (!activeJob) return
-    const fallbackPreview = previewUrlMap.get(activeJob.fileName) || ''
+    const key = activeJob.relativePath || activeJob.fileName
+    const fallbackPreview = previewUrlMap.get(key) || previewUrlMap.get(activeJob.fileName) || ''
     const beforeUrl = resolveApiAssetUrl(activeJob.inputImageUrl || fallbackPreview)
     if (!beforeUrl) return
 
@@ -274,6 +490,105 @@ export default function WorkbenchPage() {
     }
   }
 
+  function toggleGroup(groupName) {
+    setExpandedGroups((prev) => ({
+      ...prev,
+      [groupName]: !prev[groupName],
+    }))
+  }
+
+  function startFloatingDrag(e) {
+    dragStateRef.current.active = true
+    dragStateRef.current.offsetX = e.clientX - floatingPos.x
+    dragStateRef.current.offsetY = e.clientY - floatingPos.y
+  }
+
+  function renderJobCard(job) {
+    const key = job.relativePath || job.fileName
+    const localPreview = previewUrlMap.get(key) || previewUrlMap.get(job.fileName) || ''
+    const beforeUrl = resolveApiAssetUrl(job.inputImageUrl || localPreview)
+    const afterUrl = resolveApiAssetUrl(job.resultImageUrl || '')
+
+    return (
+      <button
+        key={job.taskId}
+        type="button"
+        onClick={() => setActiveTaskId(job.taskId)}
+        className={[
+          'rounded-xl border p-3 text-left transition hover:border-slate-400',
+          activeJob?.taskId === job.taskId
+            ? 'border-indigo-300 bg-indigo-50/40'
+            : 'border-slate-200 bg-white',
+        ].join(' ')}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <p className="line-clamp-2 text-xs font-semibold text-slate-800">
+            {job.fileName || job.taskId}
+          </p>
+          <span
+            className={[
+              'inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium',
+              jobStatusStyle(job.status),
+            ].join(' ')}
+          >
+            {job.status}
+          </span>
+        </div>
+
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <div className="rounded-md border border-slate-200 bg-slate-100 p-1">
+            {beforeUrl ? (
+              <img src={beforeUrl} alt="处理前" className="h-20 w-full rounded object-cover" />
+            ) : (
+              <div className="flex h-20 items-center justify-center text-[11px] text-slate-500">
+                无预览
+              </div>
+            )}
+          </div>
+          <div className="rounded-md border border-slate-200 bg-slate-100 p-1">
+            {afterUrl ? (
+              <img src={afterUrl} alt="处理后" className="h-20 w-full rounded object-cover" />
+            ) : (
+              <div className="flex h-20 items-center justify-center text-[11px] text-slate-500">
+                处理中
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            className="px-2 py-1 text-[11px]"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              setActiveTaskId(job.taskId)
+              setFloatingCompareTaskId(job.taskId)
+            }}
+            disabled={!beforeUrl || !afterUrl}
+          >
+            悬浮拖拽对比
+          </Button>
+          <Button
+            type="button"
+            variant="danger"
+            className="px-2 py-1 text-[11px]"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              handleCancelTask(job.taskId)
+            }}
+            disabled={isTerminalStatus(job.status)}
+          >
+            结束
+          </Button>
+        </div>
+      </button>
+    )
+  }
+
   return (
     <div className="space-y-6 motion-safe:animate-fadeIn">
       <PageHeader
@@ -282,7 +597,7 @@ export default function WorkbenchPage() {
       />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <section className="lg:col-span-4 space-y-4">
+        <section className="space-y-4 lg:col-span-4">
           <Card className="space-y-4">
             <h3 className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900">
               <Settings2 size={16} aria-hidden="true" />
@@ -303,13 +618,13 @@ export default function WorkbenchPage() {
                 resetTaskStates()
                 setStatus('idle')
                 setStatusMessage('')
+                inFlightRef.current = false
+                stopPolling()
               }}
             />
 
             <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-900">
-                复原模式
-              </label>
+              <label className="block text-sm font-medium text-slate-900">复原模式</label>
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value)}
@@ -321,20 +636,31 @@ export default function WorkbenchPage() {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-slate-500">
-                当前选择：{modeLabel(mode)}
-              </p>
+              <p className="text-xs text-slate-500">当前选择：{modeLabel(mode)}</p>
             </div>
 
-            <Button
-              variant="primary"
-              onClick={handleStart}
-              disabled={!canStart}
-              className="w-full gap-2"
-            >
-              <WandSparkles size={15} aria-hidden="true" />
-              开始处理
-            </Button>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <Button variant="primary" onClick={handleStart} disabled={!canStart} className="w-full gap-2">
+                <WandSparkles size={15} aria-hidden="true" />
+                开始处理
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => handleCancelTask(activeJob?.taskId)}
+                disabled={!canCancelCurrent}
+                className="w-full gap-2"
+              >
+                <StopCircle size={15} aria-hidden="true" />
+                结束当前
+              </Button>
+            </div>
+
+            {isBatch ? (
+              <Button variant="danger" onClick={handleCancelAll} disabled={!canCancelAll} className="w-full gap-2">
+                <StopCircle size={15} aria-hidden="true" />
+                结束本批次全部任务
+              </Button>
+            ) : null}
 
             <div className="space-y-3">
               <StatusBanner status={status} message={statusMessage} />
@@ -355,18 +681,16 @@ export default function WorkbenchPage() {
           </Card>
 
           <Card>
-            <h3 className="text-sm font-semibold tracking-tight text-slate-900">
-              说明
-            </h3>
-            <ul className="mt-3 list-disc pl-5 text-sm text-slate-600 space-y-1">
-              <li>支持单图上传，也支持文件夹批量上传（自动筛选图片）。</li>
-              <li>推理时长与图片大小、模型、GPU 资源有关。</li>
-              <li>批量模式下可点击右侧任务卡片查看单图详细日志与流程。</li>
+            <h3 className="text-sm font-semibold tracking-tight text-slate-900">说明</h3>
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-600">
+              <li>任务 ID 和上传文件会按时间戳命名，便于追溯与归档。</li>
+              <li>文件夹上传会保留后端目录层级，历史页按批次可折叠查看。</li>
+              <li>页面切换后会自动恢复任务状态，不会丢失当前展示进度。</li>
             </ul>
           </Card>
         </section>
 
-        <section className="lg:col-span-8 space-y-4">
+        <section className="space-y-4 lg:col-span-8">
           <Card className="space-y-4">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="text-sm font-semibold tracking-tight text-slate-900">
@@ -395,85 +719,57 @@ export default function WorkbenchPage() {
             </div>
 
             {!isBatch ? (
-              <BeforeAfterSlider
-                beforeSrc={resolveApiAssetUrl(
-                  activeJob?.inputImageUrl || previewUrls[0]?.url || ''
-                )}
-                afterSrc={resolveApiAssetUrl(activeJob?.resultImageUrl || '')}
-                disabled={status === 'uploading' || status === 'inferencing'}
-              />
-            ) : (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {jobs.map((job) => {
-                  const localPreview = previewUrlMap.get(job.fileName) || ''
-                  const beforeUrl = resolveApiAssetUrl(job.inputImageUrl || localPreview)
-                  const afterUrl = resolveApiAssetUrl(job.resultImageUrl || '')
-
+              <>
+                <BeforeAfterSlider
+                  beforeSrc={resolveApiAssetUrl(activeJob?.inputImageUrl || previewUrls[0]?.url || '')}
+                  afterSrc={resolveApiAssetUrl(activeJob?.resultImageUrl || '')}
+                  disabled={status === 'uploading' || status === 'inferencing'}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    variant="secondary"
+                    onClick={() => setFloatingCompareTaskId(activeJob?.taskId || '')}
+                    disabled={!activeJob?.inputImageUrl || !activeJob?.resultImageUrl}
+                  >
+                    悬浮拖拽对比
+                  </Button>
+                </div>
+              </>
+            ) : isFolderBatch ? (
+              <div className="space-y-3">
+                {folderGroups.map((group) => {
+                  const open = expandedGroups[group.groupName] ?? true
                   return (
-                    <button
-                      key={job.taskId}
-                      type="button"
-                      onClick={() => setActiveTaskId(job.taskId)}
-                      className={[
-                        'rounded-xl border p-3 text-left transition hover:border-slate-400',
-                        activeJob?.taskId === job.taskId
-                          ? 'border-indigo-300 bg-indigo-50/40'
-                          : 'border-slate-200 bg-white',
-                      ].join(' ')}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="line-clamp-1 text-xs font-semibold text-slate-800">
-                          {job.fileName || job.taskId}
-                        </p>
-                        <span
-                          className={[
-                            'inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium',
-                            jobStatusStyle(job.status),
-                          ].join(' ')}
-                        >
-                          {job.status}
+                    <div key={group.groupName} className="rounded-xl border border-slate-200 bg-white">
+                      <button
+                        type="button"
+                        onClick={() => toggleGroup(group.groupName)}
+                        className="flex w-full items-center justify-between px-3 py-2 text-left"
+                      >
+                        <span className="inline-flex items-center gap-2 text-sm font-semibold text-slate-800">
+                          {open ? <FolderOpen size={16} /> : <Folder size={16} />}
+                          {group.groupName}
                         </span>
-                      </div>
-
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        <div className="rounded-md border border-slate-200 bg-slate-100 p-1">
-                          {beforeUrl ? (
-                            <img
-                              src={beforeUrl}
-                              alt="处理前"
-                              className="h-20 w-full rounded object-cover"
-                            />
-                          ) : (
-                            <div className="flex h-20 items-center justify-center text-[11px] text-slate-500">
-                              无预览
-                            </div>
-                          )}
+                        <span className="text-xs text-slate-500">{group.items.length} 张</span>
+                      </button>
+                      {open ? (
+                        <div className="grid grid-cols-1 gap-3 border-t border-slate-100 p-3 sm:grid-cols-2 xl:grid-cols-3">
+                          {group.items.map((job) => renderJobCard(job))}
                         </div>
-                        <div className="rounded-md border border-slate-200 bg-slate-100 p-1">
-                          {afterUrl ? (
-                            <img
-                              src={afterUrl}
-                              alt="处理后"
-                              className="h-20 w-full rounded object-cover"
-                            />
-                          ) : (
-                            <div className="flex h-20 items-center justify-center text-[11px] text-slate-500">
-                              处理中
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </button>
+                      ) : null}
+                    </div>
                   )
                 })}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {jobs.map((job) => renderJobCard(job))}
               </div>
             )}
           </Card>
 
           <Card>
-            <h3 className="text-sm font-semibold tracking-tight text-slate-900">
-              状态说明
-            </h3>
+            <h3 className="text-sm font-semibold tracking-tight text-slate-900">状态说明</h3>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-3">
                 <p className="text-xs font-semibold text-slate-900">上传</p>
@@ -481,36 +777,26 @@ export default function WorkbenchPage() {
               </div>
               <div className="rounded-xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-3">
                 <p className="text-xs font-semibold text-slate-900">推理</p>
-                <p className="mt-1 text-xs text-slate-600">云端 GPU 推理</p>
+                <p className="mt-1 text-xs text-slate-600">云端 GPU 推理（可手动结束）</p>
               </div>
               <div className="rounded-xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-3">
                 <p className="text-xs font-semibold text-slate-900">结果</p>
-                <p className="mt-1 text-xs text-slate-600">生成对比与下载</p>
+                <p className="mt-1 text-xs text-slate-600">支持批次展开与悬浮拖拽对比</p>
               </div>
             </div>
-            {isBatch ? (
-              <p className="mt-3 text-xs text-slate-500">
-                批量模式：点击上方任意任务卡片，可在下方查看该图片的日志与流程细节。
-              </p>
-            ) : null}
           </Card>
 
           <Card>
-            <h3 className="text-sm font-semibold tracking-tight text-slate-900">
-              智能体推理过程（日志）
-            </h3>
+            <h3 className="text-sm font-semibold tracking-tight text-slate-900">智能体推理过程（日志）</h3>
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-950 p-3">
               <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-emerald-200">
-                {activeJob?.logText ||
-                  '日志将在任务开始后显示（含命令输出与 workflow.log 片段）'}
+                {activeJob?.logText || '日志将在任务开始后显示（含命令输出与 workflow.log 片段）'}
               </pre>
             </div>
           </Card>
 
           <Card>
-            <h3 className="text-sm font-semibold tracking-tight text-slate-900">
-              实时流程可视化
-            </h3>
+            <h3 className="text-sm font-semibold tracking-tight text-slate-900">实时流程可视化</h3>
             <div className="mt-3 space-y-4">
               {activeJob?.flow?.stages?.length ? (
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
@@ -525,8 +811,8 @@ export default function WorkbenchPage() {
                       ].join(' ')}
                     >
                       <p className="text-xs font-semibold text-slate-900">{stage.label}</p>
-                      <p className="mt-1 line-clamp-3 text-[11px] text-slate-600">
-                        {stage.detail || '等待中'}
+                      <p className="mt-1 line-clamp-4 break-all text-[11px] text-slate-600">
+                        {normalizeFlowText(stage.detail) || '等待中'}
                       </p>
                     </div>
                   ))}
@@ -575,15 +861,47 @@ export default function WorkbenchPage() {
               {activeJob?.flow?.scoreLines?.length ? (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs font-semibold text-slate-900">打分与选择</p>
-                  <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-5 text-slate-700">
-                    {activeJob.flow.scoreLines.join('\n')}
-                  </pre>
+                  <ul className="mt-2 space-y-1 text-[11px] leading-5 text-slate-700">
+                    {activeJob.flow.scoreLines.map((line, idx) => (
+                      <li key={`${idx}-${line.slice(0, 12)}`} className="break-all">
+                        {normalizeFlowText(line)}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               ) : null}
             </div>
           </Card>
         </section>
       </div>
+
+      {floatingCompareJob ? (
+        <div
+          className="fixed z-50 w-[min(92vw,720px)] rounded-xl border border-slate-300 bg-white p-3 shadow-2xl"
+          style={{ left: `${floatingPos.x}px`, top: `${floatingPos.y}px` }}
+        >
+          <div
+            className="mb-2 flex cursor-move items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-2 py-1"
+            onMouseDown={startFloatingDrag}
+          >
+            <p className="line-clamp-1 text-xs font-semibold text-slate-700">
+              悬浮对比：{floatingCompareJob.fileName || floatingCompareJob.taskId}
+            </p>
+            <button
+              type="button"
+              onClick={() => setFloatingCompareTaskId('')}
+              className="rounded p-1 text-slate-500 hover:bg-slate-200 hover:text-slate-800"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          <BeforeAfterSlider
+            beforeSrc={resolveApiAssetUrl(floatingCompareJob.inputImageUrl || '')}
+            afterSrc={resolveApiAssetUrl(floatingCompareJob.resultImageUrl || '')}
+            disabled={!floatingCompareJob.inputImageUrl || !floatingCompareJob.resultImageUrl}
+          />
+        </div>
+      ) : null}
     </div>
   )
 }

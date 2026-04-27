@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import threading
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,31 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
+ACTIVE_PROCESSES_LOCK = threading.Lock()
+
+
+def now_token() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+
+def make_task_id() -> str:
+    return f"task_{now_token()}_{uuid.uuid4().hex[:4]}"
+
+
+def make_batch_id() -> str:
+    return f"batch_{now_token()}_{uuid.uuid4().hex[:4]}"
+
+
+def sanitize_filename_base(name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_")
+    return cleaned[:80] or "image"
+
+
+def sanitize_relative_path(path_text: str) -> Path:
+    raw_parts = str(path_text or "").replace("\\", "/").split("/")
+    safe_parts = [p for p in raw_parts if p and p not in {".", ".."}]
+    return Path(*safe_parts) if safe_parts else Path("")
 
 
 def utc_now() -> str:
@@ -73,13 +99,31 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 input_image_path TEXT NOT NULL,
+                original_file_name TEXT DEFAULT '',
+                display_name TEXT DEFAULT '',
+                upload_group TEXT DEFAULT '',
+                source_type TEXT DEFAULT 'single',
+                relative_path TEXT DEFAULT '',
                 result_image_path TEXT,
                 result_image_url TEXT,
                 logs TEXT DEFAULT '',
-                error_message TEXT
+                error_message TEXT,
+                cancel_requested INTEGER DEFAULT 0
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        required_columns = {
+            "original_file_name": "TEXT DEFAULT ''",
+            "display_name": "TEXT DEFAULT ''",
+            "upload_group": "TEXT DEFAULT ''",
+            "source_type": "TEXT DEFAULT 'single'",
+            "relative_path": "TEXT DEFAULT ''",
+            "cancel_requested": "INTEGER DEFAULT 0",
+        }
+        for column, ddl in required_columns.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
         conn.commit()
 
 
@@ -107,6 +151,14 @@ def append_task_log(task_id: str, line: str) -> None:
             (new_logs, utc_now(), task_id),
         )
         conn.commit()
+
+
+def is_cancel_requested(task_id: str) -> bool:
+    with get_db_conn() as conn:
+        row = conn.execute("SELECT cancel_requested FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        return False
+    return bool(row["cancel_requested"])
 
 
 def to_media_url(path: Path) -> str:
@@ -292,26 +344,64 @@ def validate_image_upload(image: UploadFile) -> str:
     return suffix
 
 
-async def save_upload_file(image: UploadFile, task_id: str) -> Path:
+async def save_upload_file(
+    image: UploadFile,
+    task_id: str,
+    upload_group: str,
+    relative_path: str = "",
+) -> tuple[Path, str, str]:
     suffix = validate_image_upload(image)
-    filename = f"{task_id}{suffix}"
-    saved_path = UPLOAD_DIR / filename
+    original_name = Path(image.filename or "").name
+    stem = sanitize_filename_base(Path(original_name).stem)
+    timestamp = now_token()
+    renamed_file = f"{stem}_{timestamp}{suffix}"
+
+    rel_path_obj = sanitize_relative_path(relative_path)
+    rel_parent = rel_path_obj.parent if str(rel_path_obj) else Path("")
+    group_dir = UPLOAD_DIR / sanitize_filename_base(upload_group)
+    target_dir = group_dir / rel_parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = target_dir / renamed_file
     content = await image.read()
     saved_path.write_bytes(content)
-    return saved_path
+    display_name = (str(rel_parent / renamed_file) if str(rel_parent) else renamed_file)
+    return saved_path, original_name, display_name
 
 
-def create_task(task_id: str, mode: str, saved_path: Path) -> None:
+def create_task(
+    task_id: str,
+    mode: str,
+    saved_path: Path,
+    original_file_name: str,
+    display_name: str,
+    upload_group: str,
+    source_type: str,
+    relative_path: str,
+) -> None:
     now = utc_now()
     with get_db_conn() as conn:
         conn.execute(
             """
             INSERT INTO tasks (
                 id, mode, status, created_at, updated_at,
-                input_image_path, logs, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, '', '')
+                input_image_path, original_file_name, display_name,
+                upload_group, source_type, relative_path,
+                logs, error_message, cancel_requested
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', 0)
             """,
-            (task_id, mode, "queued", now, now, str(saved_path)),
+            (
+                task_id,
+                mode,
+                "queued",
+                now,
+                now,
+                str(saved_path),
+                original_file_name,
+                display_name,
+                upload_group,
+                source_type,
+                relative_path,
+            ),
         )
         conn.commit()
 
@@ -325,6 +415,10 @@ def run_4kagent_task(task_id: str) -> None:
     with get_db_conn() as conn:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if not row:
+        return
+
+    if is_cancel_requested(task_id):
+        update_task(task_id, status="cancelled", error_message="任务已取消")
         return
 
     update_task(task_id, status="running")
@@ -374,13 +468,23 @@ def run_4kagent_task(task_id: str) -> None:
             text=True,
             bufsize=1,
         )
+        with ACTIVE_PROCESSES_LOCK:
+            ACTIVE_PROCESSES[task_id] = proc
 
         assert proc.stdout is not None
         for line in proc.stdout:
             append_task_log(task_id, line)
+            if is_cancel_requested(task_id):
+                append_task_log(task_id, "[system] 检测到取消请求，正在终止任务...")
+                proc.terminate()
+                break
 
 
         return_code = proc.wait()
+        cancelled = is_cancel_requested(task_id)
+        if cancelled:
+            update_task(task_id, status="cancelled", error_message="任务已取消")
+            return
         if return_code != 0:
             update_task(
                 task_id,
@@ -407,6 +511,9 @@ def run_4kagent_task(task_id: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         update_task(task_id, status="failed", error_message=f"后端异常: {exc}")
+    finally:
+        with ACTIVE_PROCESSES_LOCK:
+            ACTIVE_PROCESSES.pop(task_id, None)
 
 
 init_db()
@@ -422,13 +529,29 @@ async def restore_image(
     image: UploadFile = File(...),
     mode: str = Form("FastGen4K_P"),
 ):
-    task_id = uuid.uuid4().hex[:16]
-    saved_path = await save_upload_file(image, task_id)
-    create_task(task_id=task_id, mode=mode, saved_path=saved_path)
+    task_id = make_task_id()
+    upload_group = task_id
+    saved_path, original_name, display_name = await save_upload_file(
+        image=image,
+        task_id=task_id,
+        upload_group=upload_group,
+        relative_path="",
+    )
+    create_task(
+        task_id=task_id,
+        mode=mode,
+        saved_path=saved_path,
+        original_file_name=original_name,
+        display_name=display_name,
+        upload_group=upload_group,
+        source_type="single",
+        relative_path="",
+    )
     start_task_thread(task_id)
 
     return {
         "taskId": task_id,
+        "fileName": display_name,
         "status": "queued",
         "message": "任务已提交，后端正在排队执行。",
     }
@@ -437,6 +560,7 @@ async def restore_image(
 @app.post("/api/restore/batch")
 async def restore_batch_images(
     images: list[UploadFile] = File(...),
+    image_paths: list[str] = Form([]),
     mode: str = Form("FastGen4K_P"),
 ):
     if not images:
@@ -444,23 +568,43 @@ async def restore_batch_images(
     if len(images) > 200:
         raise HTTPException(status_code=400, detail="单次最多提交 200 张图片")
 
-    batch_id = uuid.uuid4().hex[:12]
+    batch_id = make_batch_id()
     tasks: list[dict] = []
-    for image in images:
-        task_id = uuid.uuid4().hex[:16]
-        saved_path = await save_upload_file(image, task_id)
-        create_task(task_id=task_id, mode=mode, saved_path=saved_path)
+    has_folder_structure = any("/" in str(p).replace("\\", "/") for p in image_paths)
+
+    for idx, image in enumerate(images):
+        task_id = make_task_id()
+        relative_path = image_paths[idx] if idx < len(image_paths) else (image.filename or "")
+        source_type = "folder" if "/" in str(relative_path).replace("\\", "/") else "batch"
+        saved_path, original_name, display_name = await save_upload_file(
+            image=image,
+            task_id=task_id,
+            upload_group=batch_id,
+            relative_path=relative_path,
+        )
+        create_task(
+            task_id=task_id,
+            mode=mode,
+            saved_path=saved_path,
+            original_file_name=original_name,
+            display_name=display_name,
+            upload_group=batch_id,
+            source_type=source_type,
+            relative_path=str(relative_path or ""),
+        )
         start_task_thread(task_id)
         tasks.append(
             {
                 "taskId": task_id,
-                "fileName": image.filename or saved_path.name,
+                "fileName": display_name,
+                "relativePath": str(relative_path or ""),
                 "status": "queued",
             }
         )
 
     return {
         "batchId": batch_id,
+        "sourceType": "folder" if has_folder_structure else "batch",
         "status": "queued",
         "tasks": tasks,
         "message": f"批量任务已提交：{len(tasks)} 张图片",
@@ -496,6 +640,11 @@ def get_task_status(task_id: str):
         "status": row["status"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        "fileName": row["display_name"] or row["original_file_name"] or Path(row["input_image_path"]).name,
+        "originalFileName": row["original_file_name"] or "",
+        "relativePath": row["relative_path"] or "",
+        "sourceType": row["source_type"] or "single",
+        "uploadGroup": row["upload_group"] or "",
         "inputImageUrl": input_image_url,
         "resultImageUrl": row["result_image_url"],
         "errorMessage": row["error_message"] or "",
@@ -504,25 +653,109 @@ def get_task_status(task_id: str):
     }
 
 
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    with get_db_conn() as conn:
+        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    status = row["status"]
+    if status in {"done", "failed", "cancelled"}:
+        return {"taskId": task_id, "status": status, "message": "任务已结束，无需取消"}
+
+    update_task(task_id, cancel_requested=1, status="cancelling")
+    append_task_log(task_id, "[system] 用户发起取消任务请求")
+
+    with ACTIVE_PROCESSES_LOCK:
+        proc = ACTIVE_PROCESSES.get(task_id)
+
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {"taskId": task_id, "status": "cancelling", "message": "取消请求已提交"}
+
+
 @app.get("/api/history")
 def get_history():
     with get_db_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, mode, status, created_at, result_image_url
+            SELECT id, mode, status, created_at, result_image_url,
+                   input_image_path, display_name, original_file_name,
+                   upload_group, source_type, relative_path
             FROM tasks
             ORDER BY created_at DESC
-            LIMIT 200
+            LIMIT 500
             """
         ).fetchall()
 
-    return [
-        {
-            "id": row["id"],
-            "mode": row["mode"],
-            "status": row["status"],
-            "createdAt": row["created_at"],
-            "thumbnailUrl": row["result_image_url"] or "",
-        }
-        for row in rows
-    ]
+    group_rows: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    singles: list[sqlite3.Row] = []
+
+    for row in rows:
+        source_type = row["source_type"] or "single"
+        group = row["upload_group"] or ""
+        if source_type in {"folder", "batch"} and group:
+            group_rows[group].append(row)
+        else:
+            singles.append(row)
+
+    entries: list[dict] = []
+
+    for row in singles:
+        display_name = row["display_name"] or row["original_file_name"] or Path(row["input_image_path"]).name
+        entries.append(
+            {
+                "entryType": "single",
+                "id": row["id"],
+                "taskId": row["id"],
+                "fileName": display_name,
+                "mode": row["mode"],
+                "status": row["status"],
+                "createdAt": row["created_at"],
+                "thumbnailUrl": row["result_image_url"] or "",
+            }
+        )
+
+    for group_id, group_items in group_rows.items():
+        sorted_items = sorted(group_items, key=lambda r: r["created_at"], reverse=True)
+        latest = sorted_items[0]
+        sample_relative = (latest["relative_path"] or "").replace("\\", "/")
+        root_name = sample_relative.split("/")[0] if "/" in sample_relative else group_id
+        child_items = []
+        for row in sorted_items:
+            display_name = row["display_name"] or row["original_file_name"] or Path(row["input_image_path"]).name
+            child_items.append(
+                {
+                    "id": row["id"],
+                    "taskId": row["id"],
+                    "fileName": display_name,
+                    "relativePath": row["relative_path"] or "",
+                    "mode": row["mode"],
+                    "status": row["status"],
+                    "createdAt": row["created_at"],
+                    "thumbnailUrl": row["result_image_url"] or "",
+                }
+            )
+
+        entries.append(
+            {
+                "entryType": latest["source_type"] or "batch",
+                "id": group_id,
+                "groupId": group_id,
+                "groupName": root_name,
+                "mode": latest["mode"],
+                "status": latest["status"],
+                "createdAt": latest["created_at"],
+                "thumbnailUrl": latest["result_image_url"] or "",
+                "count": len(child_items),
+                "items": child_items,
+            }
+        )
+
+    entries.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
+    return entries
