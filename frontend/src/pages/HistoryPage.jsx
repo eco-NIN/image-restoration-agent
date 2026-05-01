@@ -155,7 +155,6 @@ export default function HistoryPage() {
     <div className="space-y-6 motion-safe:animate-fadeIn">
       <PageHeader
         title="历史记录"
-        description="展示历史任务，并区分单图任务与文件夹/批次任务；支持展开、放大查看与主动结束。"
       />
 
       <Card className="space-y-4">
@@ -292,7 +291,6 @@ export default function HistoryPage() {
           </div>
         ) : null}
 
-        <div className="text-xs text-slate-500">支持单图历史与文件夹/批次历史的分层展示。</div>
       </Card>
 
       {(viewerTask || viewerLoading) ? (

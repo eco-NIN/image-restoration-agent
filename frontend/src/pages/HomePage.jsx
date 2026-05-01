@@ -25,9 +25,6 @@ function ComparePlaceholder({ label, imageSrc }) {
           loading="lazy"
         />
       </div>
-      <p className="mt-2 text-xs text-slate-500">
-        替换 frontend/public/demo 下同名文件即可更新该展示。
-      </p>
     </div>
   )
 }
@@ -48,11 +45,11 @@ export default function HomePage() {
         <div className="relative z-10">
           <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/90 px-3 py-1 text-xs font-medium text-slate-700">
             <Sparkles size={14} aria-hidden="true" />
-            4KAgent 毕设演示前端
+            基于4KAgent
           </div>
 
         <PageHeader
-          title="基于 4KAgent 的图像高清复原与增强智能体系统"
+          title="图像高清复原与增强"
           description="系统面向多重退化图像（低分辨率、模糊、雾化、老照片损伤等）提供统一的复原入口。用户上传输入图像并选择复原模式后，后端调用云端 GPU 推理得到 4K 级别复原结果。"
           right={
             <Link to="/workbench">
@@ -63,12 +60,6 @@ export default function HomePage() {
             </Link>
           }
         />
-
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-sm text-slate-600">
-            入口功能：样例对比展示、进入工作台进行参数配置与实验。
-          </div>
-        </div>
         </div>
       </Card>
 
@@ -77,9 +68,6 @@ export default function HomePage() {
           <h3 className="text-base font-semibold tracking-tight text-slate-900">
             静态对比展示
           </h3>
-          <p className="text-sm text-slate-600">
-            该区域用于展示“处理前 vs 处理后”的典型效果。
-          </p>
         </header>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

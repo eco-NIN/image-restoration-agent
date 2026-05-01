@@ -105,7 +105,7 @@ uvicorn backend.app.main:app --host 0.0.0.0 --port 8001 --reload
 
 ```bash
 cd frontend
-echo 'VITE_API_BASE_URL=http://127.0.0.1:8000' > .env.local
+echo 'VITE_API_BASE_URL=http://127.0.0.1:8001' > .env.local
 npm run dev
 ```
 

@@ -35,11 +35,8 @@ export default function AppLayout() {
             </div>
             <div>
               <h1 className="text-base font-semibold tracking-tight text-slate-900">
-                4KAgent 图像复原系统
+                基于任务感知与策略选择的图像复原智能体
               </h1>
-              <span className="text-xs text-slate-500">
-                前端演示（FastAPI + React）
-              </span>
             </div>
           </div>
 
@@ -64,13 +61,7 @@ export default function AppLayout() {
         <Outlet />
       </main>
 
-      <footer className="border-t border-slate-200/80 bg-white/70 backdrop-blur">
-        <div className="mx-auto w-full max-w-6xl px-4 py-6 text-xs text-slate-500">
-          <p>
-            本页面用于毕业设计演示与实验记录，不包含夸张宣传性文案。
-          </p>
-        </div>
-      </footer>
+      <footer className="border-t border-slate-200/80 bg-white/70 backdrop-blur" />
     </div>
   )
 }

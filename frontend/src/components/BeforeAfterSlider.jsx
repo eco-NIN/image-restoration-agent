@@ -109,9 +109,6 @@ export default function BeforeAfterSlider({
         )}
       </div>
 
-      <p className="text-xs text-slate-500">
-        可拖动滑块或使用键盘调节对比位置。
-      </p>
     </section>
   )
 }

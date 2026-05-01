@@ -13,6 +13,7 @@ backend/runtime/
 eval_set5_5/logs/
 eval_set5_5/*_tmp/
 eval_set5_5
+eval_set5_5_past
 
 # Node
 node_modules/

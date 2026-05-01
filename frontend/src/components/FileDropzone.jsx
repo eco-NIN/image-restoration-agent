@@ -30,13 +30,7 @@ export default function FileDropzone({
       return `已选择 ${selectedFiles.length} 张图片（首张：${fileName}）`
     }
     if (fileName) return `已选择：${fileName}`
-    if (directory) {
-      return '拖拽图片文件夹或点击选择文件夹（自动筛选其中的图片）'
-    }
-    if (multiple) {
-      return '拖拽多张图片到此处，或点击选择文件（支持 PNG/JPG/WebP 等）'
-    }
-    return '拖拽图片到此处，或点击选择文件（支持 PNG/JPG/WebP 等）'
+    return ''
   }, [directory, fileName, multiple, selectedFiles.length])
 
   function pickFile() {
@@ -108,7 +102,9 @@ export default function FileDropzone({
           <ImagePlus size={16} aria-hidden="true" />
           上传输入图像
         </div>
-        <p className="mt-1 text-sm text-slate-600">{hintText}</p>
+        {hintText ? (
+          <p className="mt-1 text-sm text-slate-600">{hintText}</p>
+        ) : null}
       </button>
 
       {error ? <p className="text-sm text-rose-700">{error}</p> : null}
