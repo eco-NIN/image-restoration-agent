@@ -15,7 +15,14 @@ backend/runtime/**
 !backend/runtime/jobs/.gitkeep
 !backend/runtime/uploads/.gitkeep
 !backend/runtime/results/.gitkeep
+
+# Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
 # Local evaluation outputs
 eval_set5_5/logs/
@@ -23,16 +30,23 @@ eval_set5_5/*_tmp/
 eval_set5_5
 eval_set5_5_past
 
-# Node
+# Node and build artifacts
 node_modules/
 dist/
+dist-ssr/
 build/
-frontend/dist/
-frontend/node_modules/
+
+# Local env overrides
+*.local
 
 # IDE
 .vscode/
 .idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
-# Mac
+# OS
 .DS_Store
