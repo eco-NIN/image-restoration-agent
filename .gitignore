@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 .env
-.env.local
 venv/
 .pytest_cache/
 
@@ -37,7 +36,7 @@ dist-ssr/
 build/
 
 # Local env overrides
-*.local
+# *.local
 
 # IDE
 .vscode/
