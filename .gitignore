@@ -28,3 +28,6 @@ frontend/node_modules/
 
 # Mac
 .DS_Store
+
+
+backend/runtime/tasks.db
