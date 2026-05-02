@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import threading
 import uuid
+import ast
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = ROOT_DIR / "backend" / "runtime"
 UPLOAD_DIR = RUNTIME_DIR / "uploads"
 JOBS_DIR = RUNTIME_DIR / "jobs"
+RESULTS_DIR = RUNTIME_DIR / "results"
 DB_PATH = RUNTIME_DIR / "tasks.db"
 
 # 只读取 4KAgent，不对该目录做任何写入改动。
@@ -49,6 +51,7 @@ FOURKAGENT_GPU_ID = os.getenv("FOURKAGENT_GPU_ID", "0")
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
@@ -124,6 +127,36 @@ def init_db() -> None:
         for column, ddl in required_columns.items():
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+        conn.commit()
+
+
+def reconcile_tasks_on_start() -> None:
+    now = utc_now()
+    with get_db_conn() as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled', error_message = '任务已取消', updated_at = ?
+            WHERE status = 'cancelling'
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled', error_message = '任务已取消', updated_at = ?
+            WHERE status = 'running' AND cancel_requested = 1
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'failed', error_message = '服务重启后任务中断', updated_at = ?
+            WHERE status = 'running' AND (cancel_requested IS NULL OR cancel_requested = 0)
+            """,
+            (now,),
+        )
         conn.commit()
 
 
@@ -229,6 +262,14 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
     running_subtask = ""
     tool_progress: list[dict] = []
     score_lines: list[str] = []
+    iqa_lines: list[str] = []
+    iqa_scores: dict[str, str] = {}
+    image_description_lines: list[str] = []
+    image_description_data: dict = {}
+    plan_list: list[str] = []
+    execution_steps: list[dict] = []
+    capture_iqa = False
+    capture_image_desc = False
 
     result_scores_path = find_latest_file_by_name(output_dir, "result_scores_with_metrics.txt")
     if result_scores_path:
@@ -237,10 +278,74 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
         except OSError:
             score_lines = []
 
+    timestamp_prefix = r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3}\s+-\s+INFO"
+
+    def strip_log_prefix(line: str) -> str:
+        match = re.match(rf"^{timestamp_prefix}\s*(.*)", line)
+        if match:
+            return match.group(1).strip()
+        return line.strip()
+
+    def strip_timestamp_inline(text: str) -> str:
+        cleaned = re.sub(rf"\s*{timestamp_prefix}\s*", " ", text)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    def is_timestamp_line(line: str) -> bool:
+        return bool(re.match(rf"^{timestamp_prefix}\s*$", line))
+
+    def append_unique(items: list[str], value: str, seen: set[str]) -> None:
+        if not value:
+            return
+        if value in seen:
+            return
+        items.append(value)
+        seen.add(value)
+
+    def append_unique_step(steps: list[dict], name: str, message: str, seen: set[str]) -> None:
+        if not name:
+            return
+        if name in seen:
+            return
+        steps.append({"type": "subtask", "name": name, "message": message})
+        seen.add(name)
+
+    seen_iqa: set[str] = set()
+    seen_exec: set[str] = set()
+    seen_tool_progress: set[str] = set()
+    seen_image_desc: set[str] = set()
+
     for line in merged_logs.splitlines():
-        clean = line.strip()
+        if is_timestamp_line(line):
+            continue
+        clean = strip_log_prefix(line)
         if not clean:
             continue
+        if "IQA scores:" in clean:
+            capture_iqa = True
+            content = clean.split("IQA scores:", 1)[-1].strip()
+            content = strip_timestamp_inline(content)
+            if content:
+                append_unique(iqa_lines, content, seen_iqa)
+            continue
+        if capture_iqa:
+            if any(key in clean for key in ["Image description:", "Plan:", "Executing", "Best tool:", "Restoration result:"]):
+                capture_iqa = False
+            else:
+                append_unique(iqa_lines, strip_timestamp_inline(clean), seen_iqa)
+                continue
+        if "Image description:" in clean:
+            capture_image_desc = True
+            content = clean.split("Image description:", 1)[-1].strip()
+            content = strip_timestamp_inline(content)
+            if content:
+                append_unique(image_description_lines, content, seen_image_desc)
+            continue
+        if capture_image_desc:
+            if any(key in clean for key in ["Plan:", "Executing", "Best tool:", "Restoration result:", "IQA scores:"]):
+                capture_image_desc = False
+            else:
+                append_unique(image_description_lines, strip_timestamp_inline(clean), seen_image_desc)
+                continue
         if "IQA scores:" in clean and not iqa_text:
             iqa_text = clean.split("IQA scores:", 1)[-1].strip() or clean
         elif "Image description:" in clean and not image_description_text:
@@ -249,6 +354,9 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
             plan_text = clean.split("Plan:", 1)[-1].strip() or clean
         elif "Executing" in clean and "on input" in clean:
             running_subtask = clean
+            subtask = clean.split("Executing", 1)[-1].split("on input", 1)[0].strip()
+            if subtask:
+                append_unique_step(execution_steps, subtask, clean, seen_exec)
         elif "Best tool:" in clean:
             best_tool = clean.split("Best tool:", 1)[-1].strip()
         elif clean.startswith("Restoration result:"):
@@ -256,6 +364,10 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
 
         m = re.search(r"([^\s]+) is used in restoration .* sequence:\s*([^@\s]+)@([^\s.]+)", clean)
         if m:
+            msg_key = f"{m.group(2)}@{m.group(3)}:{m.group(1)}"
+            if msg_key in seen_tool_progress:
+                continue
+            seen_tool_progress.add(msg_key)
             tool_progress.append(
                 {
                     "degradation": m.group(1),
@@ -293,31 +405,74 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
     input_img_path = Path(str(tree.get("img_path"))) if isinstance(tree, dict) and tree.get("img_path") else None
     input_img_url = maybe_to_media_url(input_img_path)
 
+    if iqa_lines:
+        cleaned_iqa = [
+            strip_timestamp_inline(strip_log_prefix(item))
+            for item in iqa_lines
+            if strip_log_prefix(item) and strip_timestamp_inline(strip_log_prefix(item))
+        ]
+        iqa_text = " | ".join(cleaned_iqa)
+        for item in cleaned_iqa:
+            if ":" in item:
+                key, value = item.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if key:
+                    iqa_scores[key] = value
+
+    if image_description_lines:
+        image_description_text = "\n".join(image_description_lines).strip()
+        payload = image_description_text
+        json_match = re.search(r"\{.*?\}", image_description_text, re.DOTALL)
+        if json_match:
+            payload = json_match.group(0)
+        if payload.startswith("{") and payload.endswith("}"):
+            try:
+                image_description_data = json.loads(payload)
+            except Exception:  # noqa: BLE001
+                try:
+                    image_description_data = ast.literal_eval(payload)
+                except Exception:  # noqa: BLE001
+                    image_description_data = {}
+        if image_description_data:
+            image_description_text = str(image_description_data.get("image_description", ""))
+        elif image_description_text:
+            image_description_text = strip_timestamp_inline(image_description_text)
+            image_description_data = {"image_description": image_description_text}
+
+    if plan_text:
+        try:
+            parsed_plan = ast.literal_eval(plan_text)
+            if isinstance(parsed_plan, list):
+                plan_list = [str(item) for item in parsed_plan]
+        except Exception:  # noqa: BLE001
+            plan_list = []
+
     return {
         "stages": [
             {
                 "id": "evaluation",
                 "label": "评估",
                 "detail": iqa_text,
-                "done": bool(iqa_text),
+                "done": bool(iqa_lines or iqa_scores),
             },
             {
                 "id": "perception",
                 "label": "感知",
                 "detail": image_description_text,
-                "done": bool(image_description_text),
+                "done": bool(image_description_data or image_description_text),
             },
             {
                 "id": "decision",
                 "label": "决策",
                 "detail": plan_text,
-                "done": bool(plan_text),
+                "done": bool(plan_list or plan_text),
             },
             {
                 "id": "execution",
                 "label": "执行",
                 "detail": running_subtask,
-                "done": bool(tool_nodes or tool_progress),
+                "done": bool(execution_steps or tool_progress or tool_nodes),
             },
             {
                 "id": "feedback",
@@ -329,9 +484,16 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
         "inputImageUrl": input_img_url,
         "toolNodes": tool_nodes,
         "toolProgress": tool_progress,
+        "executionSteps": execution_steps,
         "scoreLines": score_lines,
+        "iqaScores": iqa_scores,
+        "iqaLines": iqa_lines,
+        "imageDescription": image_description_data.get("image_description", "") if isinstance(image_description_data, dict) else "",
+        "degradations": image_description_data.get("degradations", []) if isinstance(image_description_data, dict) else [],
+        "planList": plan_list,
         "bestTool": best_tool,
         "finalResult": final_result,
+        "runningSubtask": running_subtask,
     }
 
 
@@ -433,6 +595,7 @@ def run_4kagent_task(task_id: str) -> None:
     task_input_path = input_dir / source_input.name
     shutil.copy2(source_input, task_input_path)
 
+    profile_name = row["mode"] or FOURKAGENT_PROFILE_NAME
     command = [
         "python",
         "infer_4kagent.py",
@@ -441,7 +604,7 @@ def run_4kagent_task(task_id: str) -> None:
         "--output_dir",
         str(output_dir),
         "--profile_name",
-        FOURKAGENT_PROFILE_NAME,
+        profile_name,
         "--tool_run_gpu_id",
         str(FOURKAGENT_GPU_ID),
     ]
@@ -502,11 +665,23 @@ def run_4kagent_task(task_id: str) -> None:
             )
             return
 
+        upload_group = str(row["upload_group"] or "")
+        source_type = str(row["source_type"] or "single")
+        relative_path = str(row["relative_path"] or "")
+        group_name = sanitize_filename_base(upload_group or task_id)
+        result_root = RESULTS_DIR / (group_name if source_type in {"folder", "batch"} else task_id)
+        rel_parent = sanitize_relative_path(relative_path).parent if relative_path else Path("")
+        target_dir = result_root / rel_parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_name = f"{task_id}_{result_path.name}"
+        target_path = target_dir / target_name
+        shutil.copy2(result_path, target_path)
+
         update_task(
             task_id,
             status="done",
-            result_image_path=str(result_path),
-            result_image_url=to_media_url(result_path),
+            result_image_path=str(target_path),
+            result_image_url=to_media_url(target_path),
             error_message="",
         )
     except Exception as exc:  # noqa: BLE001
@@ -517,6 +692,7 @@ def run_4kagent_task(task_id: str) -> None:
 
 
 init_db()
+reconcile_tasks_on_start()
 app.mount("/media", StaticFiles(directory=str(RUNTIME_DIR)), name="media")
 
 @app.get("/")
@@ -527,7 +703,7 @@ def read_root():
 @app.post("/api/restore")
 async def restore_image(
     image: UploadFile = File(...),
-    mode: str = Form("FastGen4K_P"),
+    mode: str = Form(FOURKAGENT_PROFILE_NAME),
 ):
     task_id = make_task_id()
     upload_group = task_id
@@ -561,7 +737,7 @@ async def restore_image(
 async def restore_batch_images(
     images: list[UploadFile] = File(...),
     image_paths: list[str] = Form([]),
-    mode: str = Form("FastGen4K_P"),
+    mode: str = Form(FOURKAGENT_PROFILE_NAME),
 ):
     if not images:
         raise HTTPException(status_code=400, detail="请至少上传一张图片")
@@ -624,8 +800,7 @@ def get_task_status(task_id: str):
     merged_logs = db_logs
     if workflow_tail:
         merged_logs = (db_logs + "\n[workflow.log]\n" + workflow_tail).strip()
-
-    log_lines = merged_logs.splitlines()
+    log_lines = db_logs.splitlines()
 
     input_image_url = ""
     input_image_path_text = row["input_image_path"] or ""

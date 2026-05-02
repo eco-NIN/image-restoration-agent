@@ -49,22 +49,20 @@ export default function BeforeAfterSlider({
       >
         {!isReady ? (
           <div className="flex h-full w-full items-center justify-center">
-            <p className="text-sm text-slate-600">
-              请先完成一次处理以生成对比视图
-            </p>
+            <p className="text-sm text-slate-600">请先完成一次处理以生成对比视图</p>
           </div>
         ) : (
           <>
             <img
-              src={beforeSrc}
-              alt={beforeAlt}
+              src={afterSrc}
+              alt={afterAlt}
               className="absolute inset-0 h-full w-full object-contain"
               draggable={false}
             />
 
             <img
-              src={afterSrc}
-              alt={afterAlt}
+              src={beforeSrc}
+              alt={beforeAlt}
               className="absolute inset-0 h-full w-full object-contain"
               style={clipStyle}
               draggable={false}

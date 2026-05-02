@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Folder, Image as ImageIcon, StopCircle, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, Folder, StopCircle, X } from 'lucide-react'
 
 import Alert from '../components/Alert.jsx'
 import BeforeAfterSlider from '../components/BeforeAfterSlider.jsx'
@@ -59,7 +59,7 @@ function StatusPill({ status }) {
   return (
     <span
       className={[
-        'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium',
+        'inline-flex min-w-[52px] items-center justify-center rounded-full border px-2 py-0.5 text-xs font-medium',
         styles,
       ].join(' ')}
     >
@@ -113,6 +113,17 @@ export default function HistoryPage() {
     loadHistory()
   }, [])
 
+  useEffect(() => {
+    if (viewerTask || viewerLoading) {
+      const prevOverflow = document.body.style.overflow
+      document.body.style.overflow = 'hidden'
+      return () => {
+        document.body.style.overflow = prevOverflow
+      }
+    }
+    return undefined
+  }, [viewerTask, viewerLoading])
+
   function toggleGroup(groupId) {
     setExpandedGroups((prev) => ({
       ...prev,
@@ -125,6 +136,7 @@ export default function HistoryPage() {
     try {
       await cancelTask(taskId)
       await loadHistory()
+      window.setTimeout(() => loadHistory(), 1500)
     } catch (e) {
       setErrorMessage(e?.message || '取消任务失败')
     }
@@ -180,39 +192,37 @@ export default function HistoryPage() {
               if (!isGroup) {
                 return (
                   <div key={it.id} className="rounded-xl border border-slate-200 bg-white p-3">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-12 md:items-center">
-                      <div className="md:col-span-2">{renderThumb(it.thumbnailUrl)}</div>
-                      <div className="md:col-span-3">
-                        <p className="text-xs text-slate-500">任务 ID</p>
-                        <p className="font-mono text-xs text-slate-800">{String(it.taskId || it.id)}</p>
-                      </div>
-                      <div className="md:col-span-2">
-                        <p className="text-xs text-slate-500">文件</p>
-                        <p className="line-clamp-2 text-xs text-slate-700">{it.fileName || '-'}</p>
-                      </div>
-                      <div className="md:col-span-1">
-                        <StatusPill status={it.status} />
-                      </div>
-                      <div className="md:col-span-2 text-xs text-slate-600">
-                        {formatDateTime(it.createdAt)}
-                      </div>
-                      <div className="md:col-span-2 flex flex-wrap justify-start gap-2 md:justify-end">
-                        <Button
-                          variant="secondary"
-                          className="px-2 py-1 text-xs"
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto_1fr] md:items-center">
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
                           onClick={() => openViewer(it.taskId || it.id)}
+                          className="rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
                         >
-                          放大查看
-                        </Button>
-                        <Button
-                          variant="danger"
-                          className="px-2 py-1 text-xs"
-                          onClick={() => handleCancel(it.taskId || it.id)}
-                          disabled={isTerminalStatus(it.status)}
-                        >
-                          <StopCircle size={14} className="mr-1" />
-                          结束
-                        </Button>
+                          {renderThumb(it.thumbnailUrl)}
+                        </button>
+                        <div>
+                          <p className="line-clamp-1 text-sm font-semibold text-slate-900">
+                            {it.fileName || '-'}
+                          </p>
+                          <p className="mt-1 font-mono text-xs text-slate-500">
+                            {String(it.taskId || it.id)}
+                          </p>
+                        </div>
+                      </div>
+                      <p className="text-center text-xs text-slate-500">{formatDateTime(it.createdAt)}</p>
+                      <div className="flex flex-col items-center gap-2 md:justify-self-end md:pr-6">
+                        <StatusPill status={it.status} />
+                        {!isTerminalStatus(it.status) ? (
+                          <Button
+                            variant="danger"
+                            className="px-2 py-1 text-xs"
+                            onClick={() => handleCancel(it.taskId || it.id)}
+                          >
+                            <StopCircle size={14} className="mr-1" />
+                            结束
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -224,7 +234,7 @@ export default function HistoryPage() {
                 <div key={it.id} className="rounded-xl border border-slate-200 bg-white">
                   <button
                     type="button"
-                    className="flex w-full items-center justify-between px-3 py-3"
+                    className="grid w-full grid-cols-1 items-center gap-2 px-3 py-3 md:grid-cols-[1fr_auto_1fr]"
                     onClick={() => toggleGroup(it.id)}
                   >
                     <div className="flex items-center gap-2 text-left">
@@ -240,7 +250,8 @@ export default function HistoryPage() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <p className="text-center text-xs text-slate-500">{formatDateTime(it.createdAt)}</p>
+                    <div className="md:justify-self-end md:pr-6">
                       <StatusPill status={it.status} />
                     </div>
                   </button>
@@ -250,36 +261,37 @@ export default function HistoryPage() {
                       {(it.items || []).map((child) => (
                         <div
                           key={child.id}
-                          className="grid grid-cols-1 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2 md:grid-cols-12 md:items-center"
+                          className="grid grid-cols-1 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2 md:grid-cols-[1fr_auto_1fr] md:items-center"
                         >
-                          <div className="md:col-span-2">{renderThumb(child.thumbnailUrl)}</div>
-                          <div className="md:col-span-3">
-                            <p className="font-mono text-xs text-slate-800">{child.taskId || child.id}</p>
-                            <p className="line-clamp-2 text-xs text-slate-600">{child.relativePath || child.fileName}</p>
-                          </div>
-                          <div className="md:col-span-2 text-xs text-slate-600">{child.mode || '-'}</div>
-                          <div className="md:col-span-1">
-                            <StatusPill status={child.status} />
-                          </div>
-                          <div className="md:col-span-2 text-xs text-slate-600">
-                            {formatDateTime(child.createdAt)}
-                          </div>
-                          <div className="md:col-span-2 flex flex-wrap justify-start gap-2 md:justify-end">
-                            <Button
-                              variant="secondary"
-                              className="px-2 py-1 text-xs"
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
                               onClick={() => openViewer(child.taskId || child.id)}
+                              className="rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
                             >
-                              放大查看
-                            </Button>
-                            <Button
-                              variant="danger"
-                              className="px-2 py-1 text-xs"
-                              onClick={() => handleCancel(child.taskId || child.id)}
-                              disabled={isTerminalStatus(child.status)}
-                            >
-                              结束
-                            </Button>
+                              {renderThumb(child.thumbnailUrl)}
+                            </button>
+                            <div>
+                              <p className="line-clamp-1 text-sm font-semibold text-slate-900">
+                                {child.relativePath || child.fileName}
+                              </p>
+                              <p className="mt-1 font-mono text-xs text-slate-500">
+                                {child.taskId || child.id}
+                              </p>
+                            </div>
+                          </div>
+                          <p className="text-center text-xs text-slate-500">{formatDateTime(child.createdAt)}</p>
+                          <div className="flex flex-col items-center gap-2 md:justify-self-end md:pr-6">
+                            <StatusPill status={child.status} />
+                            {!isTerminalStatus(child.status) ? (
+                              <Button
+                                variant="danger"
+                                className="px-2 py-1 text-xs"
+                                onClick={() => handleCancel(child.taskId || child.id)}
+                              >
+                                结束
+                              </Button>
+                            ) : null}
                           </div>
                         </div>
                       ))}
@@ -294,12 +306,11 @@ export default function HistoryPage() {
       </Card>
 
       {(viewerTask || viewerLoading) ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="max-h-[92vh] w-[min(1200px,96vw)] overflow-auto rounded-xl border border-slate-300 bg-white p-4 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="inline-flex items-center gap-2 text-sm font-semibold text-slate-800">
-                <ImageIcon size={16} />
-                放大查看：{viewerTask?.fileName || viewerTask?.taskId || '加载中'}
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+          <div className="w-[min(900px,92vw)] rounded-xl border border-slate-300 bg-white p-3 shadow-xl">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-sm font-semibold text-slate-800">
+                {viewerTask?.fileName || viewerTask?.taskId || '加载中'}
               </div>
               <button
                 type="button"
@@ -313,17 +324,10 @@ export default function HistoryPage() {
             {viewerLoading ? (
               <StatusBanner status="uploading" message="正在加载任务详情..." />
             ) : (
-              <div className="space-y-3">
-                <BeforeAfterSlider
-                  beforeSrc={resolveApiAssetUrl(viewerTask?.inputImageUrl || '')}
-                  afterSrc={resolveApiAssetUrl(viewerTask?.resultImageUrl || '')}
-                />
-                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-semibold text-slate-700">任务信息</p>
-                  <p className="mt-1 font-mono text-xs text-slate-600">{viewerTask?.taskId}</p>
-                  <p className="mt-1 text-xs text-slate-600">状态：{viewerTask?.status}</p>
-                </div>
-              </div>
+              <BeforeAfterSlider
+                beforeSrc={resolveApiAssetUrl(viewerTask?.inputImageUrl || '')}
+                afterSrc={resolveApiAssetUrl(viewerTask?.resultImageUrl || '')}
+              />
             )}
           </div>
         </div>

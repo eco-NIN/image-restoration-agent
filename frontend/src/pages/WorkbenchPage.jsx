@@ -28,10 +28,18 @@ import { downloadByUrl } from '../utils/download.js'
 const WORKBENCH_RUNTIME_KEY = 'workbench_runtime_v2'
 
 const RESTORE_MODES = [
-  { value: 'FastGen4K_P', label: 'FastGen4K_P（默认）' },
-  { value: 'FaceEnhance', label: '人脸增强' },
-  { value: 'Dehaze', label: '去雾' },
-  { value: 'OldPhoto', label: '老照片修复' },
+  { value: 'MyAgent_API', label: 'MyAgent_API（默认）' },
+  { value: 'FastGen4K_P', label: 'FastGen4K_P（快速 4K 超分）' },
+  { value: 'Gen4K_P', label: 'Gen4K_P（通用 4K 超分/感知偏好）' },
+  { value: 'GenMIR_P', label: 'GenMIR_P（多退化图像复原）' },
+  { value: 'GenSR_s4_P', label: 'GenSR_s4_P（通用超分 x4/感知偏好）' },
+  { value: 'GenSRFR_s4_P', label: 'GenSRFR_s4_P（超分 x4 + 人脸修复）' },
+  { value: 'ExpSR_s4_P', label: 'ExpSR_s4_P（显式超分 x4/感知偏好）' },
+  { value: 'ExpSR_s4_F', label: 'ExpSR_s4_F（显式超分 x4/保真偏好）' },
+  { value: 'OldP4K_P', label: 'OldP4K_P（老照片 4K 修复）' },
+  { value: 'denoise_sr_hpsv2_upscale4k_P', label: 'denoise_sr_hpsv2_upscale4k_P（去噪 + 4K 超分/感知偏好）' },
+  { value: 'denoise_sr_hpsv2_upscale4k_F', label: 'denoise_sr_hpsv2_upscale4k_F（去噪 + 4K 超分/保真偏好）' },
+  { value: 'general_llamaV_hpsv2_upscale4k_face_P', label: 'general_llamaV_hpsv2_upscale4k_face_P（通用 4K + 人脸修复）' },
 ]
 
 function modeLabel(modeValue) {
@@ -77,6 +85,10 @@ function normalizeFlowText(value) {
   return text.replace(/[{}\[\]"]/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
+function stripAnsi(text) {
+  return String(text).replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+/g, ' ').trim()
+}
+
 function summarizeFinalStatus(nextJobs) {
   const doneCount = nextJobs.filter((it) => it.status === 'done').length
   const failCount = nextJobs.filter((it) => it.status === 'failed').length
@@ -86,7 +98,7 @@ function summarizeFinalStatus(nextJobs) {
 
 export default function WorkbenchPage() {
   const [imageFiles, setImageFiles] = useState([])
-  const [mode, setMode] = useState('FastGen4K_P')
+  const [mode, setMode] = useState('MyAgent_API')
 
   const [errorMessage, setErrorMessage] = useState('')
   const [fileError, setFileError] = useState('')
@@ -164,7 +176,7 @@ export default function WorkbenchPage() {
       const parsed = JSON.parse(cached)
       if (!parsed || typeof parsed !== 'object') return
 
-      setMode(parsed.mode || 'FastGen4K_P')
+      setMode(parsed.mode || 'MyAgent_API')
       setStatus(parsed.status || 'idle')
       setStatusMessage(parsed.statusMessage || '')
       setBatchId(parsed.batchId || '')
@@ -174,6 +186,9 @@ export default function WorkbenchPage() {
       const nextJobs = Array.isArray(parsed.jobs) ? parsed.jobs : []
       setJobs(nextJobs)
       jobsRef.current = nextJobs
+      if (nextJobs.length) {
+        syncJobsFromServer(nextJobs)
+      }
 
       const hasRunning = nextJobs.some((j) => !isTerminalStatus(j.status))
       if (hasRunning) {
@@ -199,7 +214,8 @@ export default function WorkbenchPage() {
   }, [mode, status, statusMessage, batchId, batchSourceType, activeTaskId, jobs])
 
   const isBatch = jobs.length > 1 || imageFiles.length > 1
-  const isFolderBatch = batchSourceType === 'folder' || imageFiles.some((f) => (f.webkitRelativePath || '').includes('/'))
+  const isFolderBatch =
+    batchSourceType === 'folder' || imageFiles.some((f) => (f.webkitRelativePath || '').includes('/'))
 
   const previewUrlMap = useMemo(() => {
     const map = new Map()
@@ -224,14 +240,20 @@ export default function WorkbenchPage() {
     [floatingCompareTaskId, jobs]
   )
 
-  const canStart = useMemo(() => imageFiles.length > 0 && !inFlightRef.current, [imageFiles.length])
-  const canCancelCurrent = useMemo(() => {
-    if (!activeJob) return false
-    return !isTerminalStatus(activeJob.status)
-  }, [activeJob])
-  const canCancelAll = useMemo(
+  const hasRunningJobs = useMemo(
     () => jobs.some((job) => !isTerminalStatus(job.status)),
     [jobs]
+  )
+  const hasActiveRun =
+    inFlightRef.current || status === 'uploading' || status === 'inferencing' || hasRunningJobs
+  const canStart = useMemo(() => imageFiles.length > 0 && !hasActiveRun, [imageFiles.length, hasActiveRun])
+  const canCancelCurrent = useMemo(() => {
+    if (!activeJob) return false
+    return hasActiveRun && !isTerminalStatus(activeJob.status)
+  }, [activeJob, hasActiveRun])
+  const canCancelAll = useMemo(
+    () => hasActiveRun && jobs.some((job) => !isTerminalStatus(job.status)),
+    [hasActiveRun, jobs]
   )
 
   const folderGroups = useMemo(() => {
@@ -260,6 +282,17 @@ export default function WorkbenchPage() {
       return next
     })
   }, [folderGroups])
+
+  useEffect(() => {
+    const handleFocus = () => {
+      const currentJobs = jobsRef.current
+      if (!currentJobs.length) return
+      syncJobsFromServer(currentJobs)
+    }
+
+    window.addEventListener('focus', handleFocus)
+    return () => window.removeEventListener('focus', handleFocus)
+  }, [])
 
   function normalizeJob(taskData, fallbackName = '') {
     return {
@@ -333,15 +366,86 @@ export default function WorkbenchPage() {
 
         const runningCount = nextJobs.filter((it) => !isTerminalStatus(it.status)).length
         if (runningCount === 0) {
-          stopPolling()
-          inFlightRef.current = false
-          setStatus('done')
-          setStatusMessage(summarizeFinalStatus(nextJobs))
+          finalizeJobsIfComplete(nextJobs)
         }
       } finally {
         pollingBusyRef.current = false
       }
     }, 2000)
+  }
+
+  function finalizeJobsIfComplete(nextJobs) {
+    if (nextJobs.some((it) => !isTerminalStatus(it.status))) return
+    stopPolling()
+    inFlightRef.current = false
+    setStatus('done')
+    setStatusMessage(summarizeFinalStatus(nextJobs))
+  }
+
+  function startPollingIfNeeded(nextJobs) {
+    if (!nextJobs.length) return
+    const hasRunning = nextJobs.some((it) => !isTerminalStatus(it.status))
+    if (hasRunning && !pollingRef.current) {
+      inFlightRef.current = true
+      beginPolling(nextJobs)
+      return
+    }
+    if (!hasRunning) {
+      finalizeJobsIfComplete(nextJobs)
+    }
+  }
+
+  async function syncJobsFromServer(jobList) {
+    try {
+      const nextJobs = await Promise.all(
+        jobList.map(async (job) => {
+          try {
+            const task = await fetchTaskStatus(job.taskId)
+            return normalizeJob(task, job.fileName)
+          } catch {
+            return job
+          }
+        })
+      )
+      setJobs(nextJobs)
+      jobsRef.current = nextJobs
+      finalizeJobsIfComplete(nextJobs)
+      startPollingIfNeeded(nextJobs)
+    } catch {
+      // ignore sync errors
+    }
+  }
+
+  async function refreshJobStatus(taskId) {
+    if (!taskId) return
+    try {
+      const task = await fetchTaskStatus(taskId)
+      setJobs((prev) => {
+        const next = prev.map((job) =>
+          job.taskId === taskId ? normalizeJob(task, job.fileName) : job
+        )
+        jobsRef.current = next
+        finalizeJobsIfComplete(next)
+        return next
+      })
+    } catch {
+      // ignore refresh errors
+    }
+  }
+
+  function stageStyle(stepId) {
+    if (status === 'uploading') {
+      return stepId === 'upload' ? 'border-blue-200 bg-blue-50' : 'border-slate-200 bg-slate-50'
+    }
+    if (status === 'inferencing') {
+      if (stepId === 'upload') return 'border-emerald-200 bg-emerald-50'
+      if (stepId === 'infer') return 'border-amber-200 bg-amber-50'
+      return 'border-slate-200 bg-slate-50'
+    }
+    if (status === 'done') {
+      return 'border-emerald-200 bg-emerald-50'
+    }
+    return 'border-slate-200 bg-slate-50'
   }
 
   async function handleStart() {
@@ -432,14 +536,8 @@ export default function WorkbenchPage() {
       await cancelTask(taskId)
       setStatus('inferencing')
       setStatusMessage('正在取消任务...')
-      const refreshed = await fetchTaskStatus(taskId)
-      setJobs((prev) => {
-        const next = prev.map((job) =>
-          job.taskId === taskId ? normalizeJob(refreshed, job.fileName) : job
-        )
-        jobsRef.current = next
-        return next
-      })
+      await refreshJobStatus(taskId)
+      window.setTimeout(() => refreshJobStatus(taskId), 1500)
     } catch (e) {
       setErrorMessage(e?.message || '取消任务失败')
     }
@@ -509,6 +607,8 @@ export default function WorkbenchPage() {
     const beforeUrl = resolveApiAssetUrl(job.inputImageUrl || localPreview)
     const afterUrl = resolveApiAssetUrl(job.resultImageUrl || '')
 
+    const canShowBatchCompare = Boolean(beforeUrl && afterUrl)
+
     return (
       <button
         key={job.taskId}
@@ -538,7 +638,20 @@ export default function WorkbenchPage() {
         <div className="mt-2 grid grid-cols-2 gap-2">
           <div className="rounded-md border border-slate-200 bg-slate-100 p-1">
             {beforeUrl ? (
-              <img src={beforeUrl} alt="处理前" className="h-20 w-full rounded object-cover" />
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (!canShowBatchCompare) return
+                  setActiveTaskId(job.taskId)
+                  setFloatingCompareTaskId(job.taskId)
+                }}
+                className="block w-full"
+                disabled={!canShowBatchCompare}
+              >
+                <img src={beforeUrl} alt="处理前" className="h-20 w-full rounded object-cover" />
+              </button>
             ) : (
               <div className="flex h-20 items-center justify-center text-[11px] text-slate-500">
                 无预览
@@ -547,43 +660,26 @@ export default function WorkbenchPage() {
           </div>
           <div className="rounded-md border border-slate-200 bg-slate-100 p-1">
             {afterUrl ? (
-              <img src={afterUrl} alt="处理后" className="h-20 w-full rounded object-cover" />
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (!canShowBatchCompare) return
+                  setActiveTaskId(job.taskId)
+                  setFloatingCompareTaskId(job.taskId)
+                }}
+                className="block w-full"
+                disabled={!canShowBatchCompare}
+              >
+                <img src={afterUrl} alt="处理后" className="h-20 w-full rounded object-cover" />
+              </button>
             ) : (
               <div className="flex h-20 items-center justify-center text-[11px] text-slate-500">
                 处理中
               </div>
             )}
           </div>
-        </div>
-
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button
-            type="button"
-            variant="secondary"
-            className="px-2 py-1 text-[11px]"
-            onClick={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
-              setActiveTaskId(job.taskId)
-              setFloatingCompareTaskId(job.taskId)
-            }}
-            disabled={!beforeUrl || !afterUrl}
-          >
-            悬浮拖拽对比
-          </Button>
-          <Button
-            type="button"
-            variant="danger"
-            className="px-2 py-1 text-[11px]"
-            onClick={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
-              handleCancelTask(job.taskId)
-            }}
-            disabled={isTerminalStatus(job.status)}
-          >
-            结束
-          </Button>
         </div>
       </button>
     )
@@ -639,23 +735,26 @@ export default function WorkbenchPage() {
               <p className="text-xs text-slate-500">当前选择：{modeLabel(mode)}</p>
             </div>
 
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <Button variant="primary" onClick={handleStart} disabled={!canStart} className="w-full gap-2">
-                <WandSparkles size={15} aria-hidden="true" />
-                开始处理
-              </Button>
-              <Button
-                variant="danger"
-                onClick={() => handleCancelTask(activeJob?.taskId)}
-                disabled={!canCancelCurrent}
-                className="w-full gap-2"
-              >
-                <StopCircle size={15} aria-hidden="true" />
-                结束当前
-              </Button>
+            <div className="flex">
+              {hasActiveRun ? (
+                <Button
+                  variant="danger"
+                  onClick={() => handleCancelTask(activeJob?.taskId)}
+                  disabled={!canCancelCurrent}
+                  className="w-full gap-2"
+                >
+                  <StopCircle size={15} aria-hidden="true" />
+                  结束当前
+                </Button>
+              ) : (
+                <Button variant="primary" onClick={handleStart} disabled={!canStart} className="w-full gap-2">
+                  <WandSparkles size={15} aria-hidden="true" />
+                  开始处理
+                </Button>
+              )}
             </div>
 
-            {isBatch ? (
+            {isBatch && hasActiveRun ? (
               <Button variant="danger" onClick={handleCancelAll} disabled={!canCancelAll} className="w-full gap-2">
                 <StopCircle size={15} aria-hidden="true" />
                 结束本批次全部任务
@@ -725,15 +824,6 @@ export default function WorkbenchPage() {
                   afterSrc={resolveApiAssetUrl(activeJob?.resultImageUrl || '')}
                   disabled={status === 'uploading' || status === 'inferencing'}
                 />
-                <div className="flex justify-end">
-                  <Button
-                    variant="secondary"
-                    onClick={() => setFloatingCompareTaskId(activeJob?.taskId || '')}
-                    disabled={!activeJob?.inputImageUrl || !activeJob?.resultImageUrl}
-                  >
-                    悬浮拖拽对比
-                  </Button>
-                </div>
               </>
             ) : isFolderBatch ? (
               <div className="space-y-3">
@@ -771,15 +861,15 @@ export default function WorkbenchPage() {
           <Card>
             <h3 className="text-sm font-semibold tracking-tight text-slate-900">状态说明</h3>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="rounded-xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-3">
+              <div className={['rounded-xl border p-3 transition-colors', stageStyle('upload')].join(' ')}>
                 <p className="text-xs font-semibold text-slate-900">上传</p>
                 <p className="mt-1 text-xs text-slate-600">客户端到后端</p>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-3">
+              <div className={['rounded-xl border p-3 transition-colors', stageStyle('infer')].join(' ')}>
                 <p className="text-xs font-semibold text-slate-900">推理</p>
                 <p className="mt-1 text-xs text-slate-600">云端 GPU 推理（可手动结束）</p>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-3">
+              <div className={['rounded-xl border p-3 transition-colors', stageStyle('result')].join(' ')}>
                 <p className="text-xs font-semibold text-slate-900">结果</p>
                 <p className="mt-1 text-xs text-slate-600">支持批次展开与悬浮拖拽对比</p>
               </div>
@@ -811,8 +901,8 @@ export default function WorkbenchPage() {
                       ].join(' ')}
                     >
                       <p className="text-xs font-semibold text-slate-900">{stage.label}</p>
-                      <p className="mt-1 line-clamp-4 break-all text-[11px] text-slate-600">
-                        {normalizeFlowText(stage.detail) || '等待中'}
+                      <p className="mt-1 text-[11px] text-slate-600">
+                        {stage.done ? '已完成' : '进行中'}
                       </p>
                     </div>
                   ))}
@@ -820,6 +910,97 @@ export default function WorkbenchPage() {
               ) : (
                 <p className="text-xs text-slate-500">任务开始后将自动展示流程节点。</p>
               )}
+
+              {activeJob?.flow?.iqaLines?.length ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-semibold text-emerald-900">评估（IQA）</p>
+                  {activeJob.flow.iqaLines
+                    .map((line) => stripAnsi(line))
+                    .filter((line) => line)
+                    .length ? (
+                    <ul className="mt-2 grid grid-cols-1 gap-2 text-[11px] text-emerald-900 sm:grid-cols-2">
+                      {activeJob.flow.iqaLines
+                        .map((line) => stripAnsi(line))
+                        .filter((line) => line)
+                        .map((line, idx) => (
+                          <li key={`${idx}-${line.slice(0, 8)}`} className="rounded-md bg-white px-2 py-1">
+                            {line}
+                          </li>
+                        ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {activeJob?.flow?.degradations?.length || activeJob?.flow?.imageDescription ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-semibold text-emerald-900">感知</p>
+                  <div className="mt-2 space-y-1 text-[11px] text-emerald-900">
+                    {activeJob?.flow?.degradations?.length ? (
+                      <p>
+                        <span className="font-semibold text-emerald-900">退化类型:</span>{' '}
+                        {activeJob.flow.degradations.join('、')}
+                      </p>
+                    ) : null}
+                    {activeJob?.flow?.imageDescription ? (
+                      <p>
+                        <span className="font-semibold text-emerald-900">描述:</span>{' '}
+                        {stripAnsi(activeJob.flow.imageDescription)}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {activeJob?.flow?.planList?.length ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-semibold text-emerald-900">决策</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-emerald-900">
+                    {activeJob.flow.planList.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {activeJob?.flow?.executionSteps?.length || activeJob?.flow?.toolProgress?.length ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-semibold text-emerald-900">执行</p>
+                  {activeJob?.flow?.executionSteps?.length ? (
+                    <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-emerald-900">
+                      {activeJob.flow.executionSteps.map((step, idx) => (
+                        <li key={`${step.name}-${idx}`}>{step.name}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-emerald-900">
+                      {activeJob.flow.toolProgress.map((item, idx) => (
+                        <li key={`${item.tool}-${idx}`}>[{item.subtask}] {item.tool}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+
+              {activeJob?.flow?.bestTool || activeJob?.flow?.finalResult ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-semibold text-emerald-900">反馈</p>
+                  <div className="mt-2 space-y-1 text-[11px] text-emerald-900">
+                    {activeJob?.flow?.bestTool ? (
+                      <p>
+                        <span className="font-semibold text-emerald-900">最优工具:</span>{' '}
+                        {activeJob.flow.bestTool}
+                      </p>
+                    ) : null}
+                    {activeJob?.flow?.finalResult ? (
+                      <p>
+                        <span className="font-semibold text-emerald-900">结果:</span>{' '}
+                        {stripAnsi(activeJob.flow.finalResult)}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
 
               {activeJob?.flow?.toolNodes?.length ? (
                 <div className="space-y-2">
