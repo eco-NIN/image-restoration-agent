@@ -1,2 +1,0 @@
-image_hat_gan, HPSv2: 0.214600, Metric: 0.581250, Overall: 0.795850
-image_swinir_gan, HPSv2: 0.223511, Metric: 0.611850, Overall: 0.835361
