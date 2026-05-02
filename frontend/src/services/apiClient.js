@@ -2,9 +2,10 @@ import axios from 'axios'
 
 // 关键设计：集中管理 API 基础配置，便于毕业设计文档描述与后续替换
 const apiBaseURL = import.meta.env.VITE_API_BASE_URL || ''
+const effectiveBaseURL = apiBaseURL || '/'
 
 export const apiClient = axios.create({
-  baseURL: apiBaseURL,
+  baseURL: effectiveBaseURL,
   timeout: 60_000,
 })
 
@@ -116,6 +117,42 @@ export async function cancelTask(taskId) {
 export async function fetchHistory() {
   try {
     const res = await apiClient.get('/api/history')
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+export async function deleteHistoryTask(taskId) {
+  try {
+    const res = await apiClient.delete(`/api/history/task/${taskId}`)
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+export async function deleteHistoryGroup(groupId) {
+  try {
+    const res = await apiClient.delete(`/api/history/group/${groupId}`)
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+export async function registerUser({ username, password }) {
+  try {
+    const res = await apiClient.post('/api/register', { username, password })
+    return res.data
+  } catch (err) {
+    throw new Error(normalizeError(err))
+  }
+}
+
+export async function loginUser({ username, password }) {
+  try {
+    const res = await apiClient.post('/api/login', { username, password })
     return res.data
   } catch (err) {
     throw new Error(normalizeError(err))

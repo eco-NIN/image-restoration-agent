@@ -12,6 +12,7 @@ export default function FileDropzone({
   error,
   multiple = false,
   directory = false,
+  disabled = false,
 }) {
   const inputId = useId()
   const inputRef = useRef(null)
@@ -34,10 +35,12 @@ export default function FileDropzone({
   }, [directory, fileName, multiple, selectedFiles.length])
 
   function pickFile() {
+    if (disabled) return
     inputRef.current?.click()
   }
 
   function handleFiles(files) {
+    if (disabled) return
     const list = Array.from(files || []).filter((file) => isImageFile(file))
     if (!list.length) {
       onChange?.(multiple ? [] : null, '请选择图片文件（image/*）')
@@ -60,6 +63,7 @@ export default function FileDropzone({
         type="file"
         accept="image/*"
         multiple={multiple || directory}
+        disabled={disabled}
         {...(directory ? { webkitdirectory: '', directory: '' } : {})}
         className="hidden"
         onChange={(e) => handleFiles(e.target.files)}
@@ -69,33 +73,40 @@ export default function FileDropzone({
         type="button"
         onClick={pickFile}
         onDragEnter={(e) => {
+          if (disabled) return
           e.preventDefault()
           e.stopPropagation()
           setIsDragging(true)
         }}
         onDragOver={(e) => {
+          if (disabled) return
           e.preventDefault()
           e.stopPropagation()
           setIsDragging(true)
         }}
         onDragLeave={(e) => {
+          if (disabled) return
           e.preventDefault()
           e.stopPropagation()
           setIsDragging(false)
         }}
         onDrop={(e) => {
+          if (disabled) return
           e.preventDefault()
           e.stopPropagation()
           setIsDragging(false)
           handleFiles(e.dataTransfer.files)
         }}
+        disabled={disabled}
         className={[
-          'w-full rounded-xl border p-4 text-left shadow-sm transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2',
+          'w-full rounded-xl border p-4 text-left shadow-sm transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-70',
           isDragging
             ? 'border-blue-400 bg-blue-50 shadow-md'
             : error
               ? 'border-rose-300 bg-rose-50'
-              : 'border-slate-300 bg-white hover:border-slate-400 hover:bg-slate-50',
+              : disabled
+                ? 'border-slate-200 bg-slate-100'
+                : 'border-slate-300 bg-white hover:border-slate-400 hover:bg-slate-50',
         ].join(' ')}
       >
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">

@@ -96,6 +96,18 @@ function summarizeFinalStatus(nextJobs) {
   return `处理结束：成功 ${doneCount}，失败 ${failCount}，取消 ${cancelCount}`
 }
 
+function summarizeRunningStatus(nextJobs) {
+  const cancellingCount = nextJobs.filter((it) => it.status === 'cancelling').length
+  const runningCount = nextJobs.filter((it) => it.status === 'running' || it.status === 'queued').length
+  if (cancellingCount > 0) return `正在取消任务：${cancellingCount} 个`
+  if (runningCount > 0) return `云端 GPU 推理中：${runningCount} 个任务进行中`
+  return '任务处理中，请稍候…'
+}
+
+function hasNonTerminalJobs(jobList) {
+  return Array.isArray(jobList) && jobList.some((it) => !isTerminalStatus(it?.status))
+}
+
 export default function WorkbenchPage() {
   const [imageFiles, setImageFiles] = useState([])
   const [mode, setMode] = useState('MyAgent_API')
@@ -190,10 +202,21 @@ export default function WorkbenchPage() {
         syncJobsFromServer(nextJobs)
       }
 
-      const hasRunning = nextJobs.some((j) => !isTerminalStatus(j.status))
+      const hasRunning = hasNonTerminalJobs(nextJobs)
       if (hasRunning) {
         inFlightRef.current = true
         beginPolling(nextJobs)
+      } else {
+        // 防止恢复到陈旧的 inferencing/uploading 状态导致上传入口被错误锁定。
+        inFlightRef.current = false
+        stopPolling()
+        if (nextJobs.length) {
+          setStatus('done')
+          setStatusMessage(summarizeFinalStatus(nextJobs))
+        } else {
+          setStatus('idle')
+          setStatusMessage('')
+        }
       }
     } catch {
       // ignore cache errors
@@ -367,6 +390,9 @@ export default function WorkbenchPage() {
         const runningCount = nextJobs.filter((it) => !isTerminalStatus(it.status)).length
         if (runningCount === 0) {
           finalizeJobsIfComplete(nextJobs)
+        } else {
+          setStatus('inferencing')
+          setStatusMessage(summarizeRunningStatus(nextJobs))
         }
       } finally {
         pollingBusyRef.current = false
@@ -383,10 +409,18 @@ export default function WorkbenchPage() {
   }
 
   function startPollingIfNeeded(nextJobs) {
-    if (!nextJobs.length) return
+    if (!nextJobs.length) {
+      inFlightRef.current = false
+      stopPolling()
+      setStatus('idle')
+      setStatusMessage('')
+      return
+    }
     const hasRunning = nextJobs.some((it) => !isTerminalStatus(it.status))
     if (hasRunning && !pollingRef.current) {
       inFlightRef.current = true
+      setStatus('inferencing')
+      setStatusMessage(summarizeRunningStatus(nextJobs))
       beginPolling(nextJobs)
       return
     }
@@ -396,6 +430,15 @@ export default function WorkbenchPage() {
   }
 
   async function syncJobsFromServer(jobList) {
+    if (!Array.isArray(jobList) || !jobList.length) {
+      inFlightRef.current = false
+      stopPolling()
+      setJobs([])
+      jobsRef.current = []
+      setStatus('idle')
+      setStatusMessage('')
+      return
+    }
     try {
       const nextJobs = await Promise.all(
         jobList.map(async (job) => {
@@ -533,6 +576,10 @@ export default function WorkbenchPage() {
   async function handleCancelTask(taskId) {
     if (!taskId) return
     try {
+      if (inferTimerRef.current) {
+        clearTimeout(inferTimerRef.current)
+        inferTimerRef.current = null
+      }
       await cancelTask(taskId)
       setStatus('inferencing')
       setStatusMessage('正在取消任务...')
@@ -546,6 +593,10 @@ export default function WorkbenchPage() {
   async function handleCancelAll() {
     const pending = jobs.filter((job) => !isTerminalStatus(job.status))
     if (!pending.length) return
+    if (inferTimerRef.current) {
+      clearTimeout(inferTimerRef.current)
+      inferTimerRef.current = null
+    }
     setStatus('inferencing')
     setStatusMessage(`正在取消 ${pending.length} 个任务...`)
     await Promise.allSettled(pending.map((job) => cancelTask(job.taskId)))
@@ -704,8 +755,13 @@ export default function WorkbenchPage() {
               values={imageFiles}
               multiple
               directory
+              disabled={hasActiveRun}
               error={fileError}
               onChange={(files, err) => {
+                if (hasActiveRun) {
+                  setFileError('任务执行中，暂不支持重新上传。请先结束当前任务。')
+                  return
+                }
                 const next = Array.isArray(files) ? files : files ? [files] : []
                 setImageFiles(next)
                 setFileError(err || '')
@@ -718,7 +774,6 @@ export default function WorkbenchPage() {
                 stopPolling()
               }}
             />
-
             <div className="space-y-2">
               <label className="block text-sm font-medium text-slate-900">复原模式</label>
               <select

@@ -104,7 +104,7 @@ uvicorn backend.app.main:app --host 0.0.0.0 --port 8001 --reload
 另开终端：
 
 ```bash
-cd frontend
+cd image-restoration-agent/frontend
 echo 'VITE_API_BASE_URL=http://127.0.0.1:8001' > .env.local
 npm run dev
 ```

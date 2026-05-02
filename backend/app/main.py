@@ -10,13 +10,17 @@ import subprocess
 import threading
 import uuid
 import ast
+from datetime import timedelta
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import bcrypt
+import jwt
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 app = FastAPI()
 logger = logging.getLogger("image-restoration-agent")
@@ -24,7 +28,8 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 origins = [
-    "http://localhost:5173"
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 ]
 
 app.add_middleware(
@@ -56,6 +61,40 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
 ACTIVE_PROCESSES_LOCK = threading.Lock()
+JWT_SECRET = os.getenv("JWT_SECRET", "image-restoration-agent-dev-secret")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+
+
+class AuthPayload(BaseModel):
+    username: str
+    password: str
+
+
+def clean_username(value: str) -> str:
+    return (value or "").strip()
+
+
+def hash_password(password: str) -> str:
+    raw = password.encode("utf-8")
+    return bcrypt.hashpw(raw, bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def build_access_token(username: str) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": username,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def now_token() -> str:
@@ -93,6 +132,16 @@ def get_db_conn() -> sqlite3.Connection:
 
 def init_db() -> None:
     with get_db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -242,6 +291,77 @@ def read_workflow_log_tail(task_id: str, max_lines: int = 120) -> str:
         return ""
     lines = content.splitlines()
     return "\n".join(lines[-max_lines:])
+
+
+def safe_unlink(path_text: str) -> None:
+    if not path_text:
+        return
+    try:
+        path = Path(path_text).resolve()
+    except Exception:  # noqa: BLE001
+        return
+
+    runtime_root = RUNTIME_DIR.resolve()
+    if runtime_root not in path.parents:
+        return
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+def safe_rmtree(path: Path) -> None:
+    try:
+        resolved = path.resolve()
+    except Exception:  # noqa: BLE001
+        return
+    runtime_root = RUNTIME_DIR.resolve()
+    if runtime_root not in resolved.parents:
+        return
+    if not resolved.exists() or not resolved.is_dir():
+        return
+    try:
+        shutil.rmtree(resolved, ignore_errors=True)
+    except OSError:
+        return
+
+
+def prune_empty_parents(start: Path, stop_at: Path) -> None:
+    try:
+        current = start.resolve()
+        boundary = stop_at.resolve()
+    except Exception:  # noqa: BLE001
+        return
+
+    while True:
+        if current == boundary:
+            return
+        if boundary not in current.parents:
+            return
+        if not current.exists() or not current.is_dir():
+            current = current.parent
+            continue
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def cleanup_empty_runtime_dirs() -> None:
+    for root in (UPLOAD_DIR, RESULTS_DIR, JOBS_DIR):
+        if not root.exists() or not root.is_dir():
+            continue
+        # Bottom-up traversal removes nested empty folders safely.
+        for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if not path.is_dir():
+                continue
+            try:
+                path.rmdir()
+            except OSError:
+                continue
 
 
 def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
@@ -854,6 +974,51 @@ def cancel_task(task_id: str):
     return {"taskId": task_id, "status": "cancelling", "message": "取消请求已提交"}
 
 
+@app.post("/api/register")
+def register_user(payload: AuthPayload):
+    username = clean_username(payload.username)
+    password = payload.password or ""
+
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="用户名至少 3 位")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少 6 位")
+
+    password_hash = hash_password(password)
+    now = utc_now()
+    try:
+        with get_db_conn() as conn:
+            conn.execute(
+                "INSERT INTO users (username, password, created_at) VALUES (?, ?, ?)",
+                (username, password_hash, now),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="用户已存在")
+
+    return {"username": username, "createdAt": now}
+
+
+@app.post("/api/login")
+def login_user(payload: AuthPayload):
+    username = clean_username(payload.username)
+    password = payload.password or ""
+
+    with get_db_conn() as conn:
+        row = conn.execute(
+            "SELECT username, password FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if not verify_password(password, row["password"]):
+        raise HTTPException(status_code=401, detail="密码错误")
+
+    token = build_access_token(row["username"])
+    return {"token": token, "username": row["username"], "tokenType": "Bearer"}
+
+
 @app.get("/api/history")
 def get_history():
     with get_db_conn() as conn:
@@ -934,3 +1099,66 @@ def get_history():
 
     entries.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
     return entries
+
+
+@app.delete("/api/history/task/{task_id}")
+def delete_history_task(task_id: str):
+    with get_db_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT id, status, upload_group, input_image_path, result_image_path
+            FROM tasks
+            WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if row["status"] in {"running", "cancelling"}:
+            raise HTTPException(status_code=409, detail="任务仍在进行中，无法删除")
+
+        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
+
+    safe_unlink(row["input_image_path"] or "")
+    safe_unlink(row["result_image_path"] or "")
+    safe_rmtree(JOBS_DIR / task_id)
+    group_id = row["upload_group"] or ""
+    if group_id:
+        safe_rmtree(UPLOAD_DIR / group_id)
+        safe_rmtree(RESULTS_DIR / group_id)
+    cleanup_empty_runtime_dirs()
+    return {"deleted": 1, "taskId": task_id}
+
+
+@app.delete("/api/history/group/{group_id}")
+def delete_history_group(group_id: str):
+    with get_db_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, status, upload_group, input_image_path, result_image_path
+            FROM tasks
+            WHERE upload_group = ?
+            """,
+            (group_id,),
+        ).fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="批次不存在")
+
+        running = [r["id"] for r in rows if r["status"] in {"running", "cancelling"}]
+        if running:
+            raise HTTPException(status_code=409, detail="批次中存在进行中任务，无法删除")
+
+        task_ids = [r["id"] for r in rows]
+        conn.executemany("DELETE FROM tasks WHERE id = ?", [(task_id,) for task_id in task_ids])
+        conn.commit()
+
+    for row in rows:
+        safe_unlink(row["input_image_path"] or "")
+        safe_unlink(row["result_image_path"] or "")
+        safe_rmtree(JOBS_DIR / row["id"])
+    safe_rmtree(UPLOAD_DIR / group_id)
+    safe_rmtree(RESULTS_DIR / group_id)
+    cleanup_empty_runtime_dirs()
+    return {"deleted": len(rows), "groupId": group_id}
