@@ -2,11 +2,19 @@
 __pycache__/
 *.pyc
 .env
+.env.local
 venv/
 .pytest_cache/
 
 # Runtime artifacts
-backend/runtime/
+backend/runtime/**
+!backend/runtime/
+!backend/runtime/jobs/
+!backend/runtime/uploads/
+!backend/runtime/results/
+!backend/runtime/jobs/.gitkeep
+!backend/runtime/uploads/.gitkeep
+!backend/runtime/results/.gitkeep
 *.log
 
 # Local evaluation outputs
@@ -28,6 +36,3 @@ frontend/node_modules/
 
 # Mac
 .DS_Store
-
-
-backend/runtime/tasks.db
