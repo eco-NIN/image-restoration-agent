@@ -108,6 +108,77 @@ function hasNonTerminalJobs(jobList) {
   return Array.isArray(jobList) && jobList.some((it) => !isTerminalStatus(it?.status))
 }
 
+function attemptStatusLabel(status) {
+  if (status === 'completed') return '流程完成'
+  if (status === 'done') return '本轮完成'
+  if (status === 'rolled_back') return '已回滚'
+  if (status === 'planned') return '已规划'
+  return '执行中'
+}
+
+function attemptStatusStyle(status) {
+  if (status === 'completed') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (status === 'done') return 'border-teal-200 bg-teal-50 text-teal-800'
+  if (status === 'rolled_back') return 'border-amber-200 bg-amber-50 text-amber-800'
+  if (status === 'planned') return 'border-slate-200 bg-slate-100 text-slate-700'
+  return 'border-indigo-200 bg-indigo-50 text-indigo-800'
+}
+
+function prettyTimestamp(raw) {
+  const text = stripAnsi(raw || '')
+  const match = text.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/)
+  return match ? match[1] : text
+}
+
+function mergeFlowProgress(prevFlow, nextFlow) {
+  if (!prevFlow) return nextFlow || null
+  if (!nextFlow) return prevFlow
+
+  const prevStages = Array.isArray(prevFlow.stages) ? prevFlow.stages : []
+  const nextStages = Array.isArray(nextFlow.stages) ? nextFlow.stages : []
+  const prevMap = new Map(prevStages.map((stage) => [stage.id, stage]))
+  const mergedStages = nextStages.map((stage) => {
+    const prevStage = prevMap.get(stage.id)
+    return {
+      ...stage,
+      done: Boolean(stage.done || prevStage?.done),
+      detail: stage.detail || prevStage?.detail || '',
+    }
+  })
+
+  const mergedPlanHistory = Array.isArray(nextFlow.planHistory) && nextFlow.planHistory.length
+    ? nextFlow.planHistory
+    : Array.isArray(prevFlow.planHistory)
+      ? prevFlow.planHistory
+      : []
+
+  const mergedAttempts = Array.isArray(nextFlow.attempts) && nextFlow.attempts.length
+    ? nextFlow.attempts
+    : Array.isArray(prevFlow.attempts)
+      ? prevFlow.attempts
+      : []
+
+  return {
+    ...prevFlow,
+    ...nextFlow,
+    stages: mergedStages,
+    planHistory: mergedPlanHistory,
+    attempts: mergedAttempts,
+    planList:
+      (Array.isArray(nextFlow.planList) && nextFlow.planList.length
+        ? nextFlow.planList
+        : Array.isArray(prevFlow.planList)
+          ? prevFlow.planList
+          : []),
+    scoreLines:
+      (Array.isArray(nextFlow.scoreLines) && nextFlow.scoreLines.length
+        ? nextFlow.scoreLines
+        : Array.isArray(prevFlow.scoreLines)
+          ? prevFlow.scoreLines
+          : []),
+  }
+}
+
 export default function WorkbenchPage() {
   const [imageFiles, setImageFiles] = useState([])
   const [mode, setMode] = useState('MyAgent_API')
@@ -318,15 +389,17 @@ export default function WorkbenchPage() {
   }, [])
 
   function normalizeJob(taskData, fallbackName = '') {
+    const taskId = String(taskData?.taskId || taskData?.id || '')
+    const prevJob = jobsRef.current.find((job) => job.taskId === taskId)
     return {
-      taskId: String(taskData?.taskId || taskData?.id || ''),
+      taskId,
       fileName: taskData?.fileName || fallbackName,
       status: taskData?.status || 'queued',
       inputImageUrl: taskData?.inputImageUrl || '',
       resultImageUrl: taskData?.resultImageUrl || '',
       errorMessage: taskData?.errorMessage || '',
       logText: taskData?.logText || '',
-      flow: taskData?.flow || null,
+      flow: mergeFlowProgress(prevJob?.flow || null, taskData?.flow || null),
       relativePath: taskData?.relativePath || '',
       sourceType: taskData?.sourceType || 'single',
       uploadGroup: taskData?.uploadGroup || '',
@@ -1007,7 +1080,116 @@ export default function WorkbenchPage() {
                 </div>
               ) : null}
 
-              {activeJob?.flow?.planList?.length ? (
+              {activeJob?.flow?.attempts?.length ? (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-slate-900">按工作流分轮次（Attempt）</p>
+                  {activeJob.flow.attempts.map((attempt) => (
+                    <div key={attempt.id || attempt.index} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-slate-900">
+                          Attempt {attempt.index}
+                          {attempt.planSource === 'adjusted' ? '（重规划）' : '（初始规划）'}
+                        </p>
+                        <span
+                          className={[
+                            'inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                            attemptStatusStyle(attempt.status),
+                          ].join(' ')}
+                        >
+                          {attemptStatusLabel(attempt.status)}
+                        </span>
+                      </div>
+
+                      {attempt.startedAt ? (
+                        <p className="mt-1 text-[11px] text-slate-600">开始时间：{prettyTimestamp(attempt.startedAt)}</p>
+                      ) : null}
+
+                      {attempt.rollbackNote ? (
+                        <p className="mt-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                          {stripAnsi(attempt.rollbackNote)}
+                        </p>
+                      ) : null}
+
+                      {attempt.planList?.length ? (
+                        <div className="mt-2">
+                          <p className="text-[11px] font-semibold text-slate-800">决策计划</p>
+                          <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] text-slate-700">
+                            {attempt.planList.map((item, idx) => (
+                              <li key={`${attempt.index}-plan-${idx}-${item}`}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+
+                      {attempt.executionSteps?.length ? (
+                        <div className="mt-3 space-y-2">
+                          {attempt.executionSteps.map((step) => (
+                            <div key={`${attempt.index}-${step.index}-${step.subtask}`} className="rounded-md border border-slate-200 bg-white p-2">
+                              <p className="text-[11px] font-semibold text-slate-900">
+                                Step {step.index}: {step.subtask}
+                              </p>
+                              <p className="mt-1 text-[11px] text-slate-600">
+                                输入节点：{stripAnsi(step.executionTarget || 'input')}
+                              </p>
+                              {step.startedAt ? (
+                                <p className="mt-1 text-[11px] text-slate-500">开始：{prettyTimestamp(step.startedAt)}</p>
+                              ) : null}
+                              {step.toolTrials?.length ? (
+                                <div className="mt-2">
+                                  <p className="text-[11px] font-semibold text-slate-700">工具试跑</p>
+                                  <ul className="mt-1 space-y-2 text-[11px] text-slate-700">
+                                    {step.toolTrials.map((trial, idx) => (
+                                      <li key={`${attempt.index}-${step.index}-trial-${idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                                        <p>
+                                          {trial.tool}（{trial.degradation}）
+                                        </p>
+                                        {trial.thumbnailUrl ? (
+                                          <img
+                                            src={resolveApiAssetUrl(trial.thumbnailUrl)}
+                                            alt={`${trial.subtask}-${trial.tool}`}
+                                            className="mt-1 h-16 w-full rounded object-cover"
+                                          />
+                                        ) : null}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                              {step.faceScores?.length ? (
+                                <div className="mt-2">
+                                  <p className="text-[11px] font-semibold text-slate-700">人脸评分</p>
+                                  <ul className="mt-1 space-y-1 text-[11px] text-slate-700">
+                                    {step.faceScores.map((face, idx) => (
+                                      <li key={`${attempt.index}-${step.index}-face-${idx}`} className="rounded bg-slate-50 px-2 py-1">
+                                        Face {face.faceId} / {face.tool}: {face.score ?? '-'}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                              {step.bestTool ? (
+                                <p className="mt-2 text-[11px] text-emerald-700">
+                                  最优工具：<span className="font-semibold">{step.bestTool}</span>
+                                </p>
+                              ) : null}
+                              {typeof step.qualityScore === 'number' ? (
+                                <p className="mt-1 text-[11px] text-emerald-700">
+                                  质量分：<span className="font-semibold">{step.qualityScore}</span>
+                                </p>
+                              ) : null}
+                              {step.resultLine ? (
+                                <p className="mt-1 text-[11px] text-slate-600">{stripAnsi(step.resultLine)}</p>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-[11px] text-slate-500">本轮尚未开始执行。</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : activeJob?.flow?.planList?.length ? (
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
                   <p className="text-xs font-semibold text-emerald-900">决策</p>
                   <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-emerald-900">
@@ -1015,25 +1197,6 @@ export default function WorkbenchPage() {
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
-                </div>
-              ) : null}
-
-              {activeJob?.flow?.executionSteps?.length || activeJob?.flow?.toolProgress?.length ? (
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
-                  <p className="text-xs font-semibold text-emerald-900">执行</p>
-                  {activeJob?.flow?.executionSteps?.length ? (
-                    <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-emerald-900">
-                      {activeJob.flow.executionSteps.map((step, idx) => (
-                        <li key={`${step.name}-${idx}`}>{step.name}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-emerald-900">
-                      {activeJob.flow.toolProgress.map((item, idx) => (
-                        <li key={`${item.tool}-${idx}`}>[{item.subtask}] {item.tool}</li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
               ) : null}
 
@@ -1096,7 +1259,10 @@ export default function WorkbenchPage() {
 
               {activeJob?.flow?.scoreLines?.length ? (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-semibold text-slate-900">打分与选择</p>
+                  <p className="text-xs font-semibold text-slate-900">打分与选择（最终汇总）</p>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    该区域展示运行目录中的最终评分文件，分轮细节请看上方 Attempt 卡片中的“工具试跑/质量分”。
+                  </p>
                   <ul className="mt-2 space-y-1 text-[11px] leading-5 text-slate-700">
                     {activeJob.flow.scoreLines.map((line, idx) => (
                       <li key={`${idx}-${line.slice(0, 12)}`} className="break-all">

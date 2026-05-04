@@ -279,7 +279,7 @@ def find_latest_file_by_name(directory: Path, file_name: str) -> Path | None:
     return candidates[0]
 
 
-def read_workflow_log_tail(task_id: str, max_lines: int = 120) -> str:
+def read_workflow_log_tail(task_id: str, max_lines: int = 2000) -> str:
     workflow_path = find_latest_file_by_name(JOBS_DIR / task_id / "output", "workflow.log")
     if workflow_path is None:
         return ""
@@ -364,7 +364,7 @@ def cleanup_empty_runtime_dirs() -> None:
                 continue
 
 
-def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
+def parse_flow_from_task(task_id: str, workflow_logs: str) -> dict:
     output_dir = JOBS_DIR / task_id / "output"
     summary_path = find_latest_file_by_name(output_dir, "summary.json")
     summary_data: dict = {}
@@ -376,7 +376,6 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
 
     iqa_text = ""
     image_description_text = ""
-    plan_text = ""
     best_tool = ""
     final_result = ""
     running_subtask = ""
@@ -387,18 +386,32 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
     image_description_lines: list[str] = []
     image_description_data: dict = {}
     plan_list: list[str] = []
+    plan_history: list[list[str]] = []
     execution_steps: list[dict] = []
+    attempts: list[dict] = []
+
     capture_iqa = False
     capture_image_desc = False
+    current_attempt: dict | None = None
+    current_step: dict | None = None
+    pending_rollback_note = ""
+    active_timestamp = ""
 
     result_scores_path = find_latest_file_by_name(output_dir, "result_scores_with_metrics.txt")
+    if result_scores_path is None:
+        result_scores_path = find_latest_file_by_name(output_dir, "result_scores.txt")
     if result_scores_path:
         try:
-            score_lines = [ln.strip() for ln in result_scores_path.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()]
+            score_lines = [
+                ln.strip()
+                for ln in result_scores_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if ln.strip()
+            ]
         except OSError:
             score_lines = []
 
     timestamp_prefix = r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3}\s+-\s+INFO"
+    timestamp_line_pattern = re.compile(rf"^({timestamp_prefix})\s*$")
 
     def strip_log_prefix(line: str) -> str:
         match = re.match(rf"^{timestamp_prefix}\s*(.*)", line)
@@ -411,7 +424,18 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
         return re.sub(r"\s+", " ", cleaned).strip()
 
     def is_timestamp_line(line: str) -> bool:
-        return bool(re.match(rf"^{timestamp_prefix}\s*$", line))
+        return bool(timestamp_line_pattern.match(line))
+
+    def is_runtime_noise(line: str) -> bool:
+        if not line:
+            return False
+        if "Decoder Task Queue:" in line:
+            return True
+        if re.search(r"\|\s*\d+/\d+\s*\[", line):
+            return True
+        if re.search(r"\d+%\|", line):
+            return True
+        return False
 
     def append_unique(items: list[str], value: str, seen: set[str]) -> None:
         if not value:
@@ -421,25 +445,121 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
         items.append(value)
         seen.add(value)
 
-    def append_unique_step(steps: list[dict], name: str, message: str, seen: set[str]) -> None:
-        if not name:
-            return
-        if name in seen:
-            return
-        steps.append({"type": "subtask", "name": name, "message": message})
-        seen.add(name)
-
     seen_iqa: set[str] = set()
-    seen_exec: set[str] = set()
     seen_tool_progress: set[str] = set()
     seen_image_desc: set[str] = set()
+    seen_plan_snapshot: set[str] = set()
 
-    for line in merged_logs.splitlines():
+    def parse_plan_text_to_list(raw_plan: str) -> list[str]:
+        if not raw_plan:
+            return []
+        try:
+            parsed = ast.literal_eval(raw_plan)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except Exception:  # noqa: BLE001
+            return []
+        return []
+
+    def normalize_subtask_name(name: str) -> str:
+        raw = str(name or "").strip()
+        if not raw:
+            return ""
+        return raw[0].lower() + raw[1:]
+
+    def ensure_attempt(
+        plan_text_raw: str = "",
+        plan_source: str = "inferred",
+        plan_trigger: str = "",
+    ) -> dict:
+        nonlocal current_attempt, current_step, pending_rollback_note, plan_list
+        if current_attempt is not None and (plan_text_raw or current_attempt.get("planList")):
+            return current_attempt
+
+        parsed_plan = parse_plan_text_to_list(plan_text_raw)
+        attempt = {
+            "id": f"attempt-{len(attempts) + 1}",
+            "index": len(attempts) + 1,
+            "planSource": plan_source,
+            "planTrigger": plan_trigger,
+            "planText": plan_text_raw,
+            "planList": parsed_plan,
+            "startedAt": active_timestamp,
+            "rollbackNote": pending_rollback_note,
+            "executionSteps": [],
+            "status": "running",
+        }
+        attempts.append(attempt)
+        current_attempt = attempt
+        current_step = None
+        pending_rollback_note = ""
+        if parsed_plan:
+            plan_list = parsed_plan
+        return attempt
+
+    def start_new_attempt(
+        plan_text_raw: str,
+        plan_source: str,
+        plan_trigger: str,
+    ) -> dict:
+        nonlocal current_attempt, current_step, pending_rollback_note, plan_list
+        parsed_plan = parse_plan_text_to_list(plan_text_raw)
+        attempt = {
+            "id": f"attempt-{len(attempts) + 1}",
+            "index": len(attempts) + 1,
+            "planSource": plan_source,
+            "planTrigger": plan_trigger,
+            "planText": plan_text_raw,
+            "planList": parsed_plan,
+            "startedAt": active_timestamp,
+            "rollbackNote": pending_rollback_note,
+            "executionSteps": [],
+            "status": "running",
+        }
+        attempts.append(attempt)
+        current_attempt = attempt
+        current_step = None
+        pending_rollback_note = ""
+        if parsed_plan:
+            snapshot_key = "|".join(parsed_plan)
+            if snapshot_key not in seen_plan_snapshot:
+                plan_history.append(parsed_plan)
+                seen_plan_snapshot.add(snapshot_key)
+            plan_list = parsed_plan
+        return attempt
+
+    def attach_result_to_recent_step(
+        result_subtask: str,
+        result_message: str,
+        quality_score: float | None,
+    ) -> None:
+        nonlocal current_step
+        needle = normalize_subtask_name(result_subtask)
+        if current_attempt and isinstance(current_attempt.get("executionSteps"), list):
+            for step in reversed(current_attempt["executionSteps"]):
+                if normalize_subtask_name(str(step.get("subtask", ""))) == needle:
+                    step["resultLine"] = result_message
+                    step["qualityScore"] = quality_score
+                    step["status"] = "done"
+                    if not step.get("bestTool") and best_tool:
+                        step["bestTool"] = best_tool
+                    if current_step and current_step.get("index") == step.get("index"):
+                        current_step = step
+                    return
+
+    for line in workflow_logs.splitlines():
         if is_timestamp_line(line):
+            active_timestamp = line.strip()
             continue
+
         clean = strip_log_prefix(line)
         if not clean:
             continue
+        if clean == "[workflow.log]":
+            continue
+        if is_runtime_noise(clean):
+            continue
+
         if "IQA scores:" in clean:
             capture_iqa = True
             content = clean.split("IQA scores:", 1)[-1].strip()
@@ -447,12 +567,14 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
             if content:
                 append_unique(iqa_lines, content, seen_iqa)
             continue
+
         if capture_iqa:
-            if any(key in clean for key in ["Image description:", "Plan:", "Executing", "Best tool:", "Restoration result:"]):
+            if any(key in clean for key in ["Image description:", "Plan:", "Adjusted plan:", "Executing", "Best tool:", "Restoration result:"]):
                 capture_iqa = False
             else:
                 append_unique(iqa_lines, strip_timestamp_inline(clean), seen_iqa)
                 continue
+
         if "Image description:" in clean:
             capture_image_desc = True
             content = clean.split("Image description:", 1)[-1].strip()
@@ -460,67 +582,165 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
             if content:
                 append_unique(image_description_lines, content, seen_image_desc)
             continue
+
         if capture_image_desc:
-            if any(key in clean for key in ["Plan:", "Executing", "Best tool:", "Restoration result:", "IQA scores:"]):
+            if any(key in clean for key in ["Plan:", "Adjusted plan:", "Executing", "Best tool:", "Restoration result:", "IQA scores:"]):
                 capture_image_desc = False
             else:
                 append_unique(image_description_lines, strip_timestamp_inline(clean), seen_image_desc)
                 continue
+
         if "IQA scores:" in clean and not iqa_text:
             iqa_text = clean.split("IQA scores:", 1)[-1].strip() or clean
         elif "Image description:" in clean and not image_description_text:
             image_description_text = clean.split("Image description:", 1)[-1].strip() or clean
-        elif "Plan:" in clean and not plan_text:
-            plan_text = clean.split("Plan:", 1)[-1].strip() or clean
-        elif "Executing" in clean and "on input" in clean:
+        elif "Plan:" in clean:
+            current_plan_text = clean.split("Plan:", 1)[-1].strip() or clean
+            if current_plan_text:
+                start_new_attempt(current_plan_text, "plan", clean)
+        elif "Adjusted plan:" in clean:
+            current_adjusted_plan = clean.split("Adjusted plan:", 1)[-1].strip().rstrip(".")
+            if current_adjusted_plan:
+                start_new_attempt(current_adjusted_plan, "adjusted", clean)
+        elif clean.startswith("Roll back for "):
+            pending_rollback_note = clean
+            if current_attempt is not None:
+                current_attempt["status"] = "rolled_back"
+        elif "Executing " in clean and " on " in clean:
+            attempt = ensure_attempt()
             running_subtask = clean
-            subtask = clean.split("Executing", 1)[-1].split("on input", 1)[0].strip()
+            execution_target = clean.split(" on ", 1)[-1].rstrip(".")
+            subtask = normalize_subtask_name(clean.split("Executing", 1)[-1].split(" on ", 1)[0].strip())
             if subtask:
-                append_unique_step(execution_steps, subtask, clean, seen_exec)
+                step = {
+                    "index": len(attempt["executionSteps"]) + 1,
+                    "subtask": subtask,
+                    "executionTarget": execution_target,
+                    "startedAt": active_timestamp,
+                    "startLine": clean,
+                    "toolTrials": [],
+                    "bestTool": "",
+                    "resultLine": "",
+                    "qualityScore": None,
+                    "faceScores": [],
+                    "status": "running",
+                }
+                attempt["executionSteps"].append(step)
+                current_step = step
+                execution_steps.append(
+                    {
+                        "type": "subtask",
+                        "name": subtask,
+                        "message": clean,
+                        "attempt": attempt["index"],
+                        "stepIndex": step["index"],
+                    }
+                )
+        elif clean.startswith("Executing face restoration"):
+            if current_step is not None:
+                current_step["faceStarted"] = True
         elif "Best tool:" in clean:
             best_tool = clean.split("Best tool:", 1)[-1].strip()
+            if current_step is not None:
+                current_step["bestTool"] = best_tool
         elif clean.startswith("Restoration result:"):
             final_result = clean.split("Restoration result:", 1)[-1].strip()
+            if current_attempt is not None:
+                current_attempt["status"] = "completed"
 
-        m = re.search(r"([^\s]+) is used in restoration .* sequence:\s*([^@\s]+)@([^\s.]+)", clean)
-        if m:
-            msg_key = f"{m.group(2)}@{m.group(3)}:{m.group(1)}"
+        m_tool = re.search(r"(.+?) is used in restoration from (.+?), sequence:\s*(.+?)\s*\.$", clean)
+        if m_tool:
+            tool_name = m_tool.group(1).strip()
+            degradation_name = m_tool.group(2).strip()
+            sequence_name = m_tool.group(3).strip()
+            msg_key = f"{sequence_name}:{degradation_name}:{tool_name}"
             if msg_key in seen_tool_progress:
                 continue
             seen_tool_progress.add(msg_key)
-            tool_progress.append(
+            trial = {
+                "degradation": degradation_name,
+                "subtask": normalize_subtask_name(sequence_name.split("-")[-1].split("@", 1)[0]) if "@" in sequence_name else "",
+                "tool": tool_name,
+                "sequence": sequence_name,
+                "status": "done",
+                "message": clean,
+                "at": active_timestamp,
+            }
+            tool_progress.append(trial)
+            if current_step is not None:
+                current_step["toolTrials"].append(trial)
+            continue
+
+        m_face = re.search(r"Face:\s*(\d+)\s+Face restoration result:\s*(.+?)\s+Score:\s*([-\d.]+)\.", clean)
+        if m_face and current_step is not None:
+            try:
+                face_score = float(m_face.group(3))
+            except ValueError:
+                face_score = None
+            current_step["faceScores"].append(
                 {
-                    "degradation": m.group(1),
-                    "subtask": m.group(2),
-                    "tool": m.group(3),
-                    "status": "done",
+                    "faceId": m_face.group(1),
+                    "tool": m_face.group(2).strip(),
+                    "score": face_score,
                     "message": clean,
+                    "at": active_timestamp,
                 }
             )
+            continue
+
+        m_result = re.search(r"^(.+?) result:\s*(.+?)\s+with quality score\s+([-\d.]+)\.$", clean)
+        if m_result:
+            try:
+                quality_score = float(m_result.group(3))
+            except ValueError:
+                quality_score = None
+            attach_result_to_recent_step(m_result.group(1), clean, quality_score)
 
     tool_nodes: list[dict] = []
+    tool_thumbnail_by_sequence: dict[str, str] = {}
     tree = (summary_data or {}).get("tree") or {}
-    children = tree.get("children") if isinstance(tree, dict) else {}
-    if isinstance(children, dict):
+
+    def collect_tool_nodes(node: dict, prefix_sequence: str = "") -> None:
+        children = node.get("children") if isinstance(node, dict) else {}
+        if not isinstance(children, dict):
+            return
         for subtask_name, subtask_data in children.items():
             if not isinstance(subtask_data, dict):
                 continue
             tools = subtask_data.get("tools") or {}
             best_tool_name = subtask_data.get("best_tool") or ""
-            if isinstance(tools, dict):
-                for tool_name, tool_data in tools.items():
-                    if not isinstance(tool_data, dict):
-                        continue
-                    img_path = Path(str(tool_data.get("img_path", ""))) if tool_data.get("img_path") else None
-                    tool_nodes.append(
-                        {
-                            "subtask": subtask_name,
-                            "tool": tool_name,
-                            "isBest": tool_name == best_tool_name,
-                            "degradation": tool_data.get("degradation", ""),
-                            "thumbnailUrl": maybe_to_media_url(img_path),
-                        }
-                    )
+            if not isinstance(tools, dict):
+                continue
+            for tool_name, tool_data in tools.items():
+                if not isinstance(tool_data, dict):
+                    continue
+                img_path = Path(str(tool_data.get("img_path", ""))) if tool_data.get("img_path") else None
+                thumbnail_url = maybe_to_media_url(img_path)
+                current_sequence = f"{prefix_sequence}-{subtask_name}@{tool_name}" if prefix_sequence else f"{subtask_name}@{tool_name}"
+                tool_nodes.append(
+                    {
+                        "subtask": subtask_name,
+                        "tool": tool_name,
+                        "isBest": tool_name == best_tool_name,
+                        "degradation": tool_data.get("degradation", ""),
+                        "thumbnailUrl": thumbnail_url,
+                        "sequence": current_sequence,
+                    }
+                )
+                if thumbnail_url:
+                    tool_thumbnail_by_sequence[current_sequence] = thumbnail_url
+                collect_tool_nodes(tool_data, current_sequence)
+
+    if isinstance(tree, dict):
+        collect_tool_nodes(tree, "")
+
+    for trial in tool_progress:
+        seq = str(trial.get("sequence") or "")
+        if not seq:
+            continue
+        thumb = tool_thumbnail_by_sequence.get(seq, "")
+        if thumb:
+            trial["thumbnailUrl"] = thumb
 
     input_img_path = Path(str(tree.get("img_path"))) if isinstance(tree, dict) and tree.get("img_path") else None
     input_img_url = maybe_to_media_url(input_img_path)
@@ -560,13 +780,27 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
             image_description_text = strip_timestamp_inline(image_description_text)
             image_description_data = {"image_description": image_description_text}
 
-    if plan_text:
-        try:
-            parsed_plan = ast.literal_eval(plan_text)
-            if isinstance(parsed_plan, list):
-                plan_list = [str(item) for item in parsed_plan]
-        except Exception:  # noqa: BLE001
-            plan_list = []
+    if not plan_list and attempts:
+        latest_plan = attempts[-1].get("planList")
+        if isinstance(latest_plan, list):
+            plan_list = [str(item) for item in latest_plan]
+
+    for attempt in attempts:
+        attempt_steps = attempt.get("executionSteps") or []
+        if not attempt_steps:
+            if attempt.get("status") not in {"completed", "rolled_back"}:
+                attempt["status"] = "planned"
+            continue
+        if all(step.get("status") == "done" for step in attempt_steps):
+            if attempt.get("status") != "completed":
+                attempt["status"] = "done"
+        else:
+            attempt["status"] = "running"
+
+    latest_attempt = attempts[-1] if attempts else {}
+    latest_plan_text = str(latest_attempt.get("planText") or "")
+    decision_detail = latest_plan_text or (plan_list and str(plan_list) or "")
+    feedback_detail = final_result or (best_tool and f"当前子任务最优工具：{best_tool}" or "")
 
     return {
         "stages": [
@@ -585,38 +819,38 @@ def parse_flow_from_task(task_id: str, merged_logs: str) -> dict:
             {
                 "id": "decision",
                 "label": "决策",
-                "detail": plan_text,
-                "done": bool(plan_list or plan_text),
+                "detail": decision_detail,
+                "done": bool(attempts),
             },
             {
                 "id": "execution",
                 "label": "执行",
                 "detail": running_subtask,
-                "done": bool(execution_steps or tool_progress or tool_nodes),
+                "done": bool(execution_steps),
             },
             {
                 "id": "feedback",
                 "label": "反馈",
-                "detail": best_tool or final_result,
-                "done": bool(best_tool or final_result),
+                "detail": feedback_detail,
+                "done": bool(final_result),
             },
         ],
         "inputImageUrl": input_img_url,
         "toolNodes": tool_nodes,
         "toolProgress": tool_progress,
         "executionSteps": execution_steps,
+        "attempts": attempts,
         "scoreLines": score_lines,
         "iqaScores": iqa_scores,
         "iqaLines": iqa_lines,
         "imageDescription": image_description_data.get("image_description", "") if isinstance(image_description_data, dict) else "",
         "degradations": image_description_data.get("degradations", []) if isinstance(image_description_data, dict) else [],
         "planList": plan_list,
+        "planHistory": plan_history,
         "bestTool": best_tool,
         "finalResult": final_result,
         "runningSubtask": running_subtask,
     }
-
-
 def validate_image_upload(image: UploadFile) -> str:
     if not image.filename:
         raise HTTPException(status_code=400, detail="上传文件缺少文件名")
@@ -916,10 +1150,7 @@ def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="任务不存在")
 
     db_logs = row["logs"] or ""
-    workflow_tail = read_workflow_log_tail(task_id, max_lines=120)
-    merged_logs = db_logs
-    if workflow_tail:
-        merged_logs = (db_logs + "\n[workflow.log]\n" + workflow_tail).strip()
+    workflow_tail = read_workflow_log_tail(task_id, max_lines=2000)
     log_lines = db_logs.splitlines()
 
     input_image_url = ""
@@ -927,7 +1158,7 @@ def get_task_status(task_id: str):
     if input_image_path_text:
         input_image_url = maybe_to_media_url(Path(input_image_path_text))
 
-    flow = parse_flow_from_task(task_id, merged_logs)
+    flow = parse_flow_from_task(task_id, workflow_tail)
 
     return {
         "taskId": row["id"],
