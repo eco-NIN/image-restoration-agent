@@ -28,6 +28,7 @@ eval_set5_5/logs/
 eval_set5_5/*_tmp/
 eval_set5_5
 eval_set5_5_past
+test1
 
 # Node and build artifacts
 node_modules/
