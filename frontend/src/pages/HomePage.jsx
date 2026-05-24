@@ -45,7 +45,7 @@ export default function HomePage() {
         <div className="relative z-10">
           <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/90 px-3 py-1 text-xs font-medium text-slate-700">
             <Sparkles size={14} aria-hidden="true" />
-            基于4KAgent
+            IRAgent
           </div>
 
         <PageHeader

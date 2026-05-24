@@ -93,7 +93,7 @@ export default function AuthPage() {
           <div className="rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 p-2 text-white shadow-sm">
             <Sparkles size={18} />
           </div>
-          <span className="text-[34px] font-semibold tracking-tight text-slate-900">4KAgent</span>
+          <span className="text-[34px] font-semibold tracking-tight text-slate-900">IRAgent</span>
         </div>
       </div>
 
@@ -101,7 +101,7 @@ export default function AuthPage() {
         <section className="flex items-center justify-center px-2 lg:px-6">
           <div className="w-full max-w-[760px] text-center">
             <h1 className="text-[62px] font-semibold tracking-tight leading-[1.08] text-slate-900">
-              4KAgent 图像复原系统
+              基于任务感知与策略选择的图像复原智能体系统
             </h1>
             <p className="mt-5 text-[34px] leading-tight text-slate-700">让低质量图像重获细节与清晰</p>
 
